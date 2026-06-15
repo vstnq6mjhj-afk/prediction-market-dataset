@@ -1,0 +1,2 @@
+generated_at,snapshot_file,row_count,is_empty,missing_required_columns,null_market_ids,duplicate_market_ids,invalid_yes_prices,invalid_no_prices,valid_snapshot
+2026-06-13T15:05:59.992113+00:00,markets_2026-06-13T15-05-58Z.csv,1096,False,,0,0,0,0,True
