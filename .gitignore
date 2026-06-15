@@ -1,0 +1,8 @@
+﻿*.duckdb
+*.db
+*.sqlite
+*.sqlite3
+data/
+warehouse/legacy_mvp_database/
+__pycache__/
+*.pyc
