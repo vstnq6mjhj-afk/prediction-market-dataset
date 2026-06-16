@@ -6,3 +6,9 @@ data/
 warehouse/legacy_mvp_database/
 __pycache__/
 *.pyc
+logs/
+*.log
+data/
+warehouse/
+__pycache__/
+*.pyc
