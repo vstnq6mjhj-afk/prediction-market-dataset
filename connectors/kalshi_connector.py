@@ -4,130 +4,113 @@ from datetime import datetime, timezone
 KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 
-def _safe_price(*values):
+def _num(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _price(*values):
     for value in values:
-        try:
-            if value is None:
-                continue
-
-            value = float(value)
-
-            # cents -> dollars
-            if value > 1:
-                value = value / 100.0
-
-            return round(value, 4)
-
-        except Exception:
+        n = _num(value, None)
+        if n is None:
             continue
 
-    return None
+        # Kalshi often uses cents, e.g. 1 = 1 cent = 0.01
+        if n > 1:
+            n = n / 100.0
 
-
-def _to_float(*values):
-    for value in values:
-        try:
-            if value is None:
-                continue
-            return float(value)
-        except Exception:
-            continue
+        return round(n, 4)
 
     return 0.0
 
 
-def _first(*values):
-    for v in values:
-        if v is not None:
-            return v
-    return None
-
-
 def fetch_kalshi_markets(limit=100):
     url = f"{KALSHI_BASE_URL}/markets"
-
     params = {
         "limit": limit,
         "status": "open",
     }
 
+    rows = []
+    now = datetime.now(timezone.utc).isoformat()
+
     try:
         response = requests.get(url, params=params, timeout=20)
         response.raise_for_status()
         payload = response.json()
-
     except Exception as e:
         print(f"Kalshi fetch failed: {e}")
-        return []
+        return rows
 
     markets = payload.get("markets", [])
-    rows = []
-
-    now = datetime.now(timezone.utc).isoformat()
 
     for market in markets:
-
-        yes_price = _safe_price(
-            market.get("yes_ask_dollars"),
-            market.get("yes_bid_dollars"),
+        yes_price = _price(
+            market.get("yes_price"),
             market.get("yes_ask"),
             market.get("yes_bid"),
             market.get("last_price"),
-            market.get("price"),
+            market.get("previous_yes_ask"),
+            market.get("previous_yes_bid"),
         )
 
-        no_price = _safe_price(
-            market.get("no_ask_dollars"),
-            market.get("no_bid_dollars"),
+        no_price = _price(
+            market.get("no_price"),
             market.get("no_ask"),
             market.get("no_bid"),
+            market.get("previous_no_ask"),
+            market.get("previous_no_bid"),
         )
 
-        if no_price is None and yes_price is not None:
+        if no_price == 0.0 and yes_price:
             no_price = round(1 - yes_price, 4)
 
-        title = (
-            market.get("title")
-            or market.get("subtitle")
-            or market.get("event_title")
-            or market.get("ticker")
-            or ""
+        volume = _num(
+            market.get("volume")
+            or market.get("volume_24h")
+            or market.get("dollar_volume")
+        )
+
+        liquidity = _num(
+            market.get("liquidity")
+            or market.get("liquidity_dollars")
+            or market.get("open_interest")
         )
 
         rows.append({
             "platform": "kalshi",
-            "market_id": market.get("event_ticker") or market.get("ticker"),
-            "title": title,
-            "category": market.get("category", "unknown"),
+            "market_id": market.get("ticker") or market.get("event_ticker"),
+            "title": market.get("title") or market.get("subtitle") or market.get("ticker"),
+            "category": market.get("category") or "unknown",
             "start_date": market.get("open_time"),
             "close_date": market.get("close_time"),
-            "resolution_date": market.get("expiration_time"),
-            "status": market.get("status", "active"),
+            "resolution_date": market.get("expected_expiration_time") or market.get("expiration_time"),
+            "status": market.get("status") or "active",
             "outcome": None,
-            "resolution_source": "",
+            "resolution_source": market.get("rules_primary") or market.get("rules_secondary"),
             "raw_url": f"https://kalshi.com/markets/{market.get('ticker')}",
-            "volume": _to_float(
-                market.get("volume"),
-                market.get("volume_24h")
-            ),
-            "liquidity": _to_float(
-                market.get("liquidity"),
-                market.get("open_interest"),
-                market.get("volume")
-            ),
+            "volume": volume,
+            "liquidity": liquidity,
             "yes_price": yes_price,
             "no_price": no_price,
             "source": "kalshi_api",
             "ingested_at": now,
+            "snapshot_time": now,
         })
 
     return rows
 
 
 if __name__ == "__main__":
-    rows = fetch_kalshi_markets(limit=10)
+    import requests
 
-    print(f"Fetched Kalshi markets: {len(rows)}")
+    url = f"{KALSHI_BASE_URL}/markets"
+    r = requests.get(url, params={"limit": 1, "status": "open"})
+    market = r.json()["markets"][0]
 
-    for row in rows[:3]:
-        print(row)
+    for k, v in market.items():
+        print(f"{k}: {v}")

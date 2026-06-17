@@ -2,7 +2,10 @@ import duckdb
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
+st_autorefresh(interval=60_000, key="dashboard_refresh")
 DB_PATH = "data/warehouse.duckdb"
 
 st.set_page_config(
