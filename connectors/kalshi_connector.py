@@ -18,13 +18,9 @@ def _price(*values):
         n = _num(value, None)
         if n is None:
             continue
-
-        # Kalshi often uses cents, e.g. 1 = 1 cent = 0.01
         if n > 1:
             n = n / 100.0
-
         return round(n, 4)
-
     return 0.0
 
 
@@ -50,6 +46,8 @@ def fetch_kalshi_markets(limit=100):
 
     for market in markets:
         yes_price = _price(
+            market.get("yes_ask_dollars"),
+            market.get("yes_bid_dollars"),
             market.get("yes_price"),
             market.get("yes_ask"),
             market.get("yes_bid"),
@@ -59,6 +57,8 @@ def fetch_kalshi_markets(limit=100):
         )
 
         no_price = _price(
+            market.get("no_ask_dollars"),
+            market.get("no_bid_dollars"),
             market.get("no_price"),
             market.get("no_ask"),
             market.get("no_bid"),
@@ -70,15 +70,18 @@ def fetch_kalshi_markets(limit=100):
             no_price = round(1 - yes_price, 4)
 
         volume = _num(
-            market.get("volume")
+            market.get("volume_24h_fp")
             or market.get("volume_24h")
-            or market.get("dollar_volume")
+            or market.get("volume")
+            or market.get("dollar_volume"),
+            default=None,
         )
 
         liquidity = _num(
-            market.get("liquidity")
-            or market.get("liquidity_dollars")
-            or market.get("open_interest")
+            market.get("liquidity_dollars")
+            or market.get("liquidity")
+            or market.get("open_interest"),
+            default=None,
         )
 
         rows.append({
@@ -106,11 +109,7 @@ def fetch_kalshi_markets(limit=100):
 
 
 if __name__ == "__main__":
-    import requests
-
-    url = f"{KALSHI_BASE_URL}/markets"
-    r = requests.get(url, params={"limit": 1, "status": "open"})
-    market = r.json()["markets"][0]
-
-    for k, v in market.items():
-        print(f"{k}: {v}")
+    rows = fetch_kalshi_markets(limit=10)
+    print(f"Fetched Kalshi markets: {len(rows)}")
+    for row in rows[:3]:
+        print(row)
