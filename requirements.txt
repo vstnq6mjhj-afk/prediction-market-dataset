@@ -1,0 +1,6 @@
+streamlit
+streamlit-autorefresh
+duckdb
+pandas
+plotly
+requests
