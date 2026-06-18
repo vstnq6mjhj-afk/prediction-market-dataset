@@ -20,7 +20,7 @@ conn = duckdb.connect(DB_PATH, read_only=True)
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Markets", "Platforms", "Movers", "Market Detail"],
+    ["Dashboard", "Markets", "Platforms", "Movers", "Opportunities", "Market Detail"],
 )
 
 platforms_df = conn.execute("""
@@ -60,7 +60,7 @@ def sql_df(query):
 
 
 def show_df(df):
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
 
 if page == "Dashboard":
@@ -134,7 +134,7 @@ if page == "Dashboard":
             markers=True,
             title="Rows Collected Over Time",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 elif page == "Markets":
@@ -216,7 +216,7 @@ elif page == "Platforms":
             y="rows",
             title="Rows by Platform",
         )
-        st.plotly_chart(fig_rows, use_container_width=True)
+        st.plotly_chart(fig_rows, width="stretch")
 
         fig_unique = px.bar(
             platform_stats,
@@ -224,8 +224,82 @@ elif page == "Platforms":
             y="unique_markets",
             title="Unique Markets by Platform",
         )
-        st.plotly_chart(fig_unique, use_container_width=True)
+        st.plotly_chart(fig_unique, width="stretch")
 
+elif page == "Opportunities":
+    st.subheader("Opportunity Scanner")
+
+    opportunities = sql_df(f"""
+        WITH latest AS (
+            SELECT *
+            FROM market_snapshots
+            WHERE snapshot_time = (
+                SELECT MAX(snapshot_time)
+                FROM market_snapshots
+            )
+        ),
+        matched AS (
+            SELECT
+                LOWER(title) AS normalized_title,
+                title,
+                platform,
+                market_id,
+                yes_price,
+                no_price,
+                volume,
+                liquidity,
+                raw_url
+            FROM latest
+            WHERE yes_price IS NOT NULL
+        ),
+        spreads AS (
+            SELECT
+                a.normalized_title,
+                a.title AS title_a,
+                b.title AS title_b,
+                a.platform AS platform_a,
+                b.platform AS platform_b,
+                a.market_id AS market_id_a,
+                b.market_id AS market_id_b,
+                a.yes_price AS price_a,
+                b.yes_price AS price_b,
+                ABS(a.yes_price - b.yes_price) AS spread,
+                a.volume AS volume_a,
+                b.volume AS volume_b,
+                a.liquidity AS liquidity_a,
+                b.liquidity AS liquidity_b,
+                a.raw_url AS url_a,
+                b.raw_url AS url_b
+            FROM matched a
+            JOIN matched b
+              ON a.normalized_title = b.normalized_title
+             AND a.platform < b.platform
+        )
+        SELECT *
+        FROM spreads
+        WHERE spread > 0
+        ORDER BY spread DESC
+        LIMIT 100
+    """)
+
+    if opportunities.empty:
+        st.info("No cross-platform opportunities found yet. This needs matching titles across platforms.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Opportunities", len(opportunities))
+        c2.metric("Largest Spread", round(opportunities["spread"].max(), 4))
+        c3.metric("Avg Spread", round(opportunities["spread"].mean(), 4))
+
+        st.dataframe(opportunities, width="stretch")
+
+        fig = px.bar(
+            opportunities.head(25),
+            x="spread",
+            y="title_a",
+            orientation="h",
+            title="Top Cross-Platform Spreads",
+        )
+        st.plotly_chart(fig, width="stretch")
 
 elif page == "Movers":
     st.subheader("Market Movers")
@@ -374,7 +448,7 @@ elif page == "Market Detail":
                     markers=True,
                     title="YES Price History",
                 )
-                st.plotly_chart(fig_price, use_container_width=True)
+                st.plotly_chart(fig_price, width="stretch")
             else:
                 st.info("No YES price history available.")
 
@@ -388,7 +462,7 @@ elif page == "Market Detail":
                     y="volume",
                     title="Volume History",
                 )
-                st.plotly_chart(fig_volume, use_container_width=True)
+                st.plotly_chart(fig_volume, width="stretch")
             else:
                 st.info("No volume history available.")
 
@@ -402,7 +476,7 @@ elif page == "Market Detail":
                     y="liquidity",
                     title="Liquidity History",
                 )
-                st.plotly_chart(fig_liquidity, use_container_width=True)
+                st.plotly_chart(fig_liquidity, width="stretch")
             else:
                 st.info("No liquidity history available.")
 
