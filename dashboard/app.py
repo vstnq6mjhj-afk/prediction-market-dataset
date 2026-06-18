@@ -2,10 +2,10 @@ import duckdb
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 st_autorefresh(interval=60_000, key="dashboard_refresh")
+
 DB_PATH = "data/warehouse.duckdb"
 
 st.set_page_config(
@@ -24,16 +24,16 @@ page = st.sidebar.radio(
 )
 
 platforms_df = conn.execute("""
-SELECT DISTINCT platform
-FROM market_snapshots
-WHERE platform IS NOT NULL
-ORDER BY platform
+    SELECT DISTINCT platform
+    FROM market_snapshots
+    WHERE platform IS NOT NULL
+    ORDER BY platform
 """).df()
 
 platforms = ["All"] + platforms_df["platform"].tolist()
 
 selected_platform = st.sidebar.selectbox("Platform", platforms)
-search = st.sidebar.text_input("Search Markets")
+search = st.sidebar.text_input("Search Markets", key="sidebar_market_search")
 
 filters = []
 
@@ -49,14 +49,18 @@ if filters:
     where_clause = "WHERE " + " AND ".join(filters)
 
 
-def sql_df(query):
-    return conn.execute(query).df()
-
-
 def latest_extra_filter():
     if filters:
         return "AND " + " AND ".join(filters)
     return ""
+
+
+def sql_df(query):
+    return conn.execute(query).df()
+
+
+def show_df(df):
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 if page == "Dashboard":
@@ -107,7 +111,7 @@ if page == "Dashboard":
         ORDER BY rows DESC
     """)
 
-    st.dataframe(platform_stats, use_container_width=True)
+    show_df(platform_stats)
 
     st.subheader("Snapshot Growth")
 
@@ -161,7 +165,7 @@ elif page == "Markets":
         LIMIT 100
     """)
 
-    st.dataframe(top_volume, use_container_width=True)
+    show_df(top_volume)
 
     st.subheader("Latest Snapshot Explorer")
 
@@ -182,7 +186,7 @@ elif page == "Markets":
         LIMIT 300
     """)
 
-    st.dataframe(latest_snapshot, use_container_width=True)
+    show_df(latest_snapshot)
 
 
 elif page == "Platforms":
@@ -203,7 +207,7 @@ elif page == "Platforms":
         ORDER BY rows DESC
     """)
 
-    st.dataframe(platform_stats, use_container_width=True)
+    show_df(platform_stats)
 
     if not platform_stats.empty:
         fig_rows = px.bar(
@@ -224,57 +228,71 @@ elif page == "Platforms":
 
 
 elif page == "Movers":
-    st.subheader("Biggest Price Movers")
+    st.subheader("Market Movers")
 
     movers = sql_df(f"""
-        SELECT
-            platform,
-            market_id,
-            title,
-            MIN(yes_price) AS low_price,
-            MAX(yes_price) AS high_price,
-            MAX(yes_price) - MIN(yes_price) AS price_move,
-            COUNT(*) AS observations
-        FROM market_snapshots
-        {where_clause}
-        GROUP BY platform, market_id, title
-        HAVING COUNT(*) >= 3
-        ORDER BY price_move DESC NULLS LAST
-        LIMIT 100
-    """)
-
-    st.dataframe(movers, use_container_width=True)
-
-    if not movers.empty:
-        fig = px.bar(
-            movers.head(25),
-            x="price_move",
-            y="title",
-            orientation="h",
-            title="Top Price Movers",
+        WITH market_changes AS (
+            SELECT
+                platform,
+                market_id,
+                title,
+                COUNT(*) AS snapshots,
+                MIN(yes_price) AS low_price,
+                MAX(yes_price) AS high_price,
+                FIRST(yes_price ORDER BY snapshot_time) AS first_price,
+                LAST(yes_price ORDER BY snapshot_time) AS last_price,
+                LAST(yes_price ORDER BY snapshot_time)
+                    - FIRST(yes_price ORDER BY snapshot_time) AS price_change,
+                LAST(volume ORDER BY snapshot_time)
+                    - FIRST(volume ORDER BY snapshot_time) AS volume_change,
+                LAST(liquidity ORDER BY snapshot_time)
+                    - FIRST(liquidity ORDER BY snapshot_time) AS liquidity_change
+            FROM market_snapshots
+            WHERE yes_price IS NOT NULL
+            {latest_extra_filter()}
+            GROUP BY platform, market_id, title
+            HAVING COUNT(*) >= 3
         )
-        fig.update_layout(height=700)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Most Active Markets")
-
-    active = sql_df(f"""
-        SELECT
-            platform,
-            market_id,
-            title,
-            COUNT(*) AS snapshots,
-            MAX(volume) - MIN(volume) AS volume_change,
-            MAX(yes_price) - MIN(yes_price) AS price_change
-        FROM market_snapshots
-        {where_clause}
-        GROUP BY platform, market_id, title
-        HAVING COUNT(*) >= 3
-        ORDER BY snapshots DESC, price_change DESC NULLS LAST
+        SELECT *
+        FROM market_changes
+        ORDER BY ABS(price_change) DESC NULLS LAST
         LIMIT 100
     """)
 
-    st.dataframe(active, use_container_width=True)
+    display_cols = [
+        "platform",
+        "market_id",
+        "title",
+        "snapshots",
+        "low_price",
+        "high_price",
+        "first_price",
+        "last_price",
+        "price_change",
+        "volume_change",
+        "liquidity_change",
+    ]
+
+    if movers.empty:
+        st.info("No movers found yet. Let the scheduler collect more snapshots.")
+    else:
+        show_df(movers[display_cols])
+
+        st.subheader("Top Gainers")
+        gainers = movers.sort_values("price_change", ascending=False).head(25)
+        show_df(gainers[display_cols])
+
+        st.subheader("Top Losers")
+        losers = movers.sort_values("price_change", ascending=True).head(25)
+        show_df(losers[display_cols])
+
+        st.subheader("Volume Movers")
+        volume_movers = movers.sort_values("volume_change", ascending=False).head(25)
+        show_df(volume_movers[display_cols])
+
+        st.subheader("Liquidity Movers")
+        liquidity_movers = movers.sort_values("liquidity_change", ascending=False).head(25)
+        show_df(liquidity_movers[display_cols])
 
 
 elif page == "Market Detail":
@@ -305,7 +323,11 @@ elif page == "Market Detail":
             + markets["market_id"].fillna("")
         )
 
-        selected_label = st.selectbox("Select a market", markets["label"].tolist())
+        selected_label = st.selectbox(
+            "Select a market",
+            markets["label"].tolist(),
+            key="market_detail_selected_market",
+        )
 
         selected_market_id = markets.loc[
             markets["label"] == selected_label,
@@ -329,43 +351,60 @@ elif page == "Market Detail":
             ORDER BY snapshot_time
         """, [selected_market_id]).df()
 
-        st.dataframe(history, use_container_width=True)
+        show_df(history.tail(25))
 
         if not history.empty:
             history["snapshot_time"] = pd.to_datetime(history["snapshot_time"])
 
-            latest_yes = history["yes_price"].dropna().iloc[-1] if not history["yes_price"].dropna().empty else "N/A"
-            latest_volume = history["volume"].dropna().iloc[-1] if not history["volume"].dropna().empty else "N/A"
+            latest = history.sort_values("snapshot_time").iloc[-1]
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Latest YES", latest_yes)
-            c2.metric("Latest Volume", latest_volume)
+            c1.metric("Latest YES", latest.get("yes_price"))
+            c2.metric("Latest Volume", latest.get("volume"))
             c3.metric("Observations", len(history))
 
             st.subheader("YES Price History")
-            fig_price = px.line(
-                history,
-                x="snapshot_time",
-                y="yes_price",
-                markers=True,
-            )
-            st.plotly_chart(fig_price, use_container_width=True)
+            price_df = history.dropna(subset=["yes_price"])
+
+            if not price_df.empty:
+                fig_price = px.line(
+                    price_df,
+                    x="snapshot_time",
+                    y="yes_price",
+                    markers=True,
+                    title="YES Price History",
+                )
+                st.plotly_chart(fig_price, use_container_width=True)
+            else:
+                st.info("No YES price history available.")
 
             st.subheader("Volume History")
-            fig_volume = px.bar(
-                history,
-                x="snapshot_time",
-                y="volume",
-            )
-            st.plotly_chart(fig_volume, use_container_width=True)
+            volume_df = history.dropna(subset=["volume"])
+
+            if not volume_df.empty:
+                fig_volume = px.bar(
+                    volume_df,
+                    x="snapshot_time",
+                    y="volume",
+                    title="Volume History",
+                )
+                st.plotly_chart(fig_volume, use_container_width=True)
+            else:
+                st.info("No volume history available.")
 
             st.subheader("Liquidity History")
-            fig_liquidity = px.area(
-                history,
-                x="snapshot_time",
-                y="liquidity",
-            )
-            st.plotly_chart(fig_liquidity, use_container_width=True)
+            liquidity_df = history.dropna(subset=["liquidity"])
+
+            if not liquidity_df.empty:
+                fig_liquidity = px.area(
+                    liquidity_df,
+                    x="snapshot_time",
+                    y="liquidity",
+                    title="Liquidity History",
+                )
+                st.plotly_chart(fig_liquidity, use_container_width=True)
+            else:
+                st.info("No liquidity history available.")
 
             csv = history.to_csv(index=False)
 
