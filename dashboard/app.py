@@ -1,8 +1,35 @@
+import re
 import duckdb
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+from difflib import SequenceMatcher
 from streamlit_autorefresh import st_autorefresh
+
+
+def similarity(a, b):
+    return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
+
+
+def normalize_title(title):
+    if not title:
+        return ""
+
+    title = str(title).lower()
+    title = re.sub(r"[^a-z0-9\s]", " ", title)
+
+    stopwords = {
+        "will", "yes", "the", "a", "an", "in", "on", "for", "of", "to",
+        "with", "and", "or", "who", "what", "when", "win", "wins"
+    }
+
+    words = []
+    for w in title.split():
+        if w not in stopwords and len(w) > 2:
+            words.append(w)
+
+    return " ".join(words[:7])
+
 
 st_autorefresh(interval=60_000, key="dashboard_refresh")
 
@@ -20,7 +47,7 @@ conn = duckdb.connect(DB_PATH, read_only=True)
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Markets", "Platforms", "Movers", "Opportunities", "Market Detail"],
+    ["Dashboard", "Markets", "Platforms", "Movers", "Opportunities", "Health", "Market Detail"],
 )
 
 platforms_df = conn.execute("""
@@ -113,8 +140,6 @@ if page == "Dashboard":
 
     show_df(platform_stats)
 
-    st.subheader("Snapshot Growth")
-
     growth = sql_df(f"""
         SELECT
             snapshot_time,
@@ -135,6 +160,25 @@ if page == "Dashboard":
             title="Rows Collected Over Time",
         )
         st.plotly_chart(fig, width="stretch")
+
+    if not platform_stats.empty:
+        fig_rows = px.bar(
+            platform_stats,
+            x="platform",
+            y="rows",
+            title="Rows By Platform",
+        )
+        st.plotly_chart(fig_rows, width="stretch")
+
+        fig_unique = px.bar(
+            platform_stats,
+            x="platform",
+            y="unique_markets",
+            title="Unique Markets By Platform",
+        )
+        st.plotly_chart(fig_unique, width="stretch")
+
+    st.subheader("Snapshot Growth")
 
 
 elif page == "Markets":
@@ -214,7 +258,7 @@ elif page == "Platforms":
             platform_stats,
             x="platform",
             y="rows",
-            title="Rows by Platform",
+            title="Rows By Platform",
         )
         st.plotly_chart(fig_rows, width="stretch")
 
@@ -222,14 +266,15 @@ elif page == "Platforms":
             platform_stats,
             x="platform",
             y="unique_markets",
-            title="Unique Markets by Platform",
+            title="Unique Markets By Platform",
         )
         st.plotly_chart(fig_unique, width="stretch")
+
 
 elif page == "Opportunities":
     st.subheader("Opportunity Scanner")
 
-    opportunities = sql_df(f"""
+    latest = sql_df(f"""
         WITH latest AS (
             SELECT *
             FROM market_snapshots
@@ -237,69 +282,122 @@ elif page == "Opportunities":
                 SELECT MAX(snapshot_time)
                 FROM market_snapshots
             )
-        ),
-        matched AS (
-            SELECT
-                LOWER(title) AS normalized_title,
-                title,
-                platform,
-                market_id,
-                yes_price,
-                no_price,
-                volume,
-                liquidity,
-                raw_url
-            FROM latest
-            WHERE yes_price IS NOT NULL
-        ),
-        spreads AS (
-            SELECT
-                a.normalized_title,
-                a.title AS title_a,
-                b.title AS title_b,
-                a.platform AS platform_a,
-                b.platform AS platform_b,
-                a.market_id AS market_id_a,
-                b.market_id AS market_id_b,
-                a.yes_price AS price_a,
-                b.yes_price AS price_b,
-                ABS(a.yes_price - b.yes_price) AS spread,
-                a.volume AS volume_a,
-                b.volume AS volume_b,
-                a.liquidity AS liquidity_a,
-                b.liquidity AS liquidity_b,
-                a.raw_url AS url_a,
-                b.raw_url AS url_b
-            FROM matched a
-            JOIN matched b
-              ON a.normalized_title = b.normalized_title
-             AND a.platform < b.platform
         )
-        SELECT *
-        FROM spreads
-        WHERE spread > 0
-        ORDER BY spread DESC
-        LIMIT 100
+        SELECT
+            platform,
+            market_id,
+            title,
+            yes_price,
+            no_price,
+            volume,
+            liquidity,
+            raw_url
+        FROM latest
+        WHERE yes_price IS NOT NULL
+          AND title IS NOT NULL
     """)
 
-    if opportunities.empty:
-        st.info("No cross-platform opportunities found yet. This needs matching titles across platforms.")
+    if latest.empty:
+        st.info("No opportunity data found yet. Let the scheduler collect more snapshots.")
     else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Opportunities", len(opportunities))
-        c2.metric("Largest Spread", round(opportunities["spread"].max(), 4))
-        c3.metric("Avg Spread", round(opportunities["spread"].mean(), 4))
+        rows = latest.to_dict("records")
+        matches = []
 
-        st.dataframe(opportunities, width="stretch")
+        for i, a in enumerate(rows):
+            for b in rows[i + 1:]:
+                if a["platform"] == b["platform"]:
+                    continue
 
-        fig = px.bar(
-            opportunities.head(25),
-            x="spread",
-            y="title_a",
-            orientation="h",
-            title="Top Cross-Platform Spreads",
-        )
-        st.plotly_chart(fig, width="stretch")
+                title_a = str(a.get("title") or "")
+                title_b = str(b.get("title") or "")
+
+                norm_a = normalize_title(title_a)
+                norm_b = normalize_title(title_b)
+
+                if not norm_a or not norm_b:
+                    continue
+
+                score = similarity(norm_a, norm_b)
+
+                if score < 0.80:
+                    continue
+
+                price_a = a.get("yes_price")
+                price_b = b.get("yes_price")
+
+                if price_a is None or price_b is None:
+                    continue
+
+                spread = abs(float(price_a) - float(price_b))
+
+                if spread < 0.01:
+                    continue
+
+                matches.append({
+                    "title_a": title_a,
+                    "title_b": title_b,
+                    "platform_a": a.get("platform"),
+                    "platform_b": b.get("platform"),
+                    "market_id_a": a.get("market_id"),
+                    "market_id_b": b.get("market_id"),
+                    "price_a": round(float(price_a), 4),
+                    "price_b": round(float(price_b), 4),
+                    "spread": round(float(spread), 4),
+                    "match_score": round(float(score), 3),
+                    "volume_a": a.get("volume"),
+                    "volume_b": b.get("volume"),
+                    "liquidity_a": a.get("liquidity"),
+                    "liquidity_b": b.get("liquidity"),
+                    "url_a": a.get("raw_url"),
+                    "url_b": b.get("raw_url"),
+                })
+
+        opportunities = pd.DataFrame(matches)
+
+        if opportunities.empty:
+            st.info("No cross-platform opportunities found yet. This needs stronger title matching across platforms.")
+
+            candidates = latest.sort_values(
+                ["volume", "liquidity"],
+                ascending=False,
+                na_position="last",
+            ).head(50)
+
+            st.subheader("Best Single-Platform Candidates")
+            show_df(candidates[[
+                "platform",
+                "market_id",
+                "title",
+                "yes_price",
+                "volume",
+                "liquidity",
+                "raw_url",
+            ]])
+        else:
+            opportunities = opportunities.sort_values(
+                ["spread", "match_score"],
+                ascending=False,
+            ).head(100)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Candidates", len(opportunities))
+            c2.metric("Largest Spread", round(opportunities["spread"].max(), 4))
+            c3.metric("Average Spread", round(opportunities["spread"].mean(), 4))
+
+            show_df(opportunities)
+
+            st.subheader("Top Opportunity Candidates")
+            chart_df = opportunities.head(25).copy()
+
+            fig = px.bar(
+                chart_df,
+                x="spread",
+                y="title_a",
+                orientation="h",
+                title="Top Cross-Platform Spreads",
+            )
+            st.plotly_chart(fig, width="stretch")
+
 
 elif page == "Movers":
     st.subheader("Market Movers")
@@ -369,6 +467,43 @@ elif page == "Movers":
         show_df(liquidity_movers[display_cols])
 
 
+elif page == "Health":
+    st.subheader("Market Health")
+
+    health = sql_df(f"""
+        SELECT
+            platform,
+            COUNT(*) AS total_rows,
+            COUNT(DISTINCT market_id) AS total_markets,
+            AVG(volume) AS avg_volume,
+            AVG(liquidity) AS avg_liquidity,
+            MIN(snapshot_time) AS first_snapshot,
+            MAX(snapshot_time) AS latest_snapshot
+        FROM market_snapshots
+        GROUP BY platform
+        ORDER BY total_rows DESC
+    """)
+
+    show_df(health)
+
+    if not health.empty:
+        fig_rows = px.bar(
+            health,
+            x="platform",
+            y="total_rows",
+            title="Rows By Platform",
+        )
+        st.plotly_chart(fig_rows, width="stretch")
+
+        fig_markets = px.bar(
+            health,
+            x="platform",
+            y="total_markets",
+            title="Markets By Platform",
+        )
+        st.plotly_chart(fig_markets, width="stretch")
+
+
 elif page == "Market Detail":
     st.subheader("Market Detail")
 
@@ -385,7 +520,7 @@ elif page == "Market Detail":
         FROM market_snapshots
         {market_where}
         ORDER BY title
-        LIMIT 5000
+        LIMIT 3000
     """)
 
     if markets.empty:
@@ -429,7 +564,6 @@ elif page == "Market Detail":
 
         if not history.empty:
             history["snapshot_time"] = pd.to_datetime(history["snapshot_time"])
-
             latest = history.sort_values("snapshot_time").iloc[-1]
 
             c1, c2, c3 = st.columns(3)
