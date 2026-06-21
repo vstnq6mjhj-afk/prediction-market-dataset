@@ -20,7 +20,11 @@ def normalize_title(title):
 
     stopwords = {
         "will", "yes", "the", "a", "an", "in", "on", "for", "of", "to",
-        "with", "and", "or", "who", "what", "when", "win", "wins"
+        "with", "and", "or", "who", "what", "when", "win", "wins" "who",
+        "will", "wins", "win", "winner", "market", "nomination", "presidential",
+        "democratic", "democratic", "republican", "election", "2024", "2025", "2026",
+        "2027", "2028",
+
     }
 
     words = []
@@ -274,7 +278,7 @@ elif page == "Platforms":
 elif page == "Opportunities":
     st.subheader("Opportunity Scanner")
 
-    latest = sql_df(f"""
+    latest = sql_df("""
         WITH latest AS (
             SELECT *
             FROM market_snapshots
@@ -298,13 +302,18 @@ elif page == "Opportunities":
     """)
 
     if latest.empty:
-        st.info("No opportunity data found yet. Let the scheduler collect more snapshots.")
+        st.info(
+            "No opportunity data found yet. Let the scheduler collect more snapshots."
+        )
+
     else:
+
         rows = latest.to_dict("records")
         matches = []
 
         for i, a in enumerate(rows):
             for b in rows[i + 1:]:
+
                 if a["platform"] == b["platform"]:
                     continue
 
@@ -317,9 +326,23 @@ elif page == "Opportunities":
                 if not norm_a or not norm_b:
                     continue
 
+                title_a_lower = title_a.lower()
+                title_b_lower = title_b.lower()
+
+                dem_a = "democratic" in title_a_lower
+                dem_b = "democratic" in title_b_lower
+                rep_a = "republican" in title_a_lower
+                rep_b = "republican" in title_b_lower
+
+                if dem_a != dem_b:
+                    continue
+
+                if rep_a != rep_b:
+                    continue
+
                 score = similarity(norm_a, norm_b)
 
-                if score < 0.80:
+                if score < 0.90:
                     continue
 
                 price_a = a.get("yes_price")
@@ -333,29 +356,96 @@ elif page == "Opportunities":
                 if spread < 0.01:
                     continue
 
-                matches.append({
-                    "title_a": title_a,
-                    "title_b": title_b,
-                    "platform_a": a.get("platform"),
-                    "platform_b": b.get("platform"),
-                    "market_id_a": a.get("market_id"),
-                    "market_id_b": b.get("market_id"),
-                    "price_a": round(float(price_a), 4),
-                    "price_b": round(float(price_b), 4),
-                    "spread": round(float(spread), 4),
-                    "match_score": round(float(score), 3),
-                    "volume_a": a.get("volume"),
-                    "volume_b": b.get("volume"),
-                    "liquidity_a": a.get("liquidity"),
-                    "liquidity_b": b.get("liquidity"),
-                    "url_a": a.get("raw_url"),
-                    "url_b": b.get("raw_url"),
-                })
+                matches.append(
+                    {
+                        "title_a": title_a,
+                        "title_b": title_b,
+                        "platform_a": a.get("platform"),
+                        "platform_b": b.get("platform"),
+                        "market_id_a": a.get("market_id"),
+                        "market_id_b": b.get("market_id"),
+                        "price_a": round(float(price_a), 4),
+                        "price_b": round(float(price_b), 4),
+                        "spread": round(float(spread), 4),
+                        "match_score": round(float(score), 3),
+                        "volume_a": a.get("volume"),
+                        "volume_b": b.get("volume"),
+                        "liquidity_a": a.get("liquidity"),
+                        "liquidity_b": b.get("liquidity"),
+                        "url_a": a.get("raw_url"),
+                        "url_b": b.get("raw_url"),
+                    }
+                )
 
         opportunities = pd.DataFrame(matches)
 
+        st.sidebar.subheader("Opportunity Filters")
+
+        min_spread = st.sidebar.slider(
+            "Minimum Spread",
+            0.00,
+            0.20,
+            0.01,
+            0.005,
+        )
+
+        min_liquidity = st.sidebar.number_input(
+            "Minimum Liquidity",
+            value=0.0,
+        )
+        keyword_filter = st.sidebar.text_input(
+            "Opportunity Keyword"
+        )
+        platform_pair = st.sidebar.selectbox(
+            "Platform Pair",
+            [
+                "All",
+                "polymarket ↔ predictit",
+            ],
+        )
+
+        st.sidebar.caption(
+            "Currently showing cross-platform matches from the latest snapshot. Additional platform pairs will appear automatically as matching markets are detected."
+        )
+
+        if keyword_filter and not opportunities.empty:
+            keyword_filter = keyword_filter.lower()
+
+            opportunities = opportunities[
+                opportunities["title_a"].str.lower().str.contains(keyword_filter, na=False)
+                | opportunities["title_b"].str.lower().str.contains(keyword_filter, na=False)
+            ]
+        if not opportunities.empty:
+
+            opportunities = opportunities[
+                opportunities["spread"] >= min_spread
+            ]
+
+            opportunities = opportunities[
+                (
+                    opportunities["liquidity_a"].fillna(0)
+                    + opportunities["liquidity_b"].fillna(0)
+                )
+                >= min_liquidity
+            ]
+        if platform_pair != "All" and not opportunities.empty:
+            left, right = [x.strip() for x in platform_pair.split("↔")]
+
+            opportunities = opportunities[
+                (
+                    (opportunities["platform_a"] == left)
+                    & (opportunities["platform_b"] == right)
+                )
+                | (
+                    (opportunities["platform_a"] == right)
+                    & (opportunities["platform_b"] == left)
+                )
+            ]
         if opportunities.empty:
-            st.info("No cross-platform opportunities found yet. This needs stronger title matching across platforms.")
+
+            st.info(
+                "No cross-platform opportunities found yet."
+            )
 
             candidates = latest.sort_values(
                 ["volume", "liquidity"],
@@ -364,29 +454,108 @@ elif page == "Opportunities":
             ).head(50)
 
             st.subheader("Best Single-Platform Candidates")
-            show_df(candidates[[
-                "platform",
-                "market_id",
-                "title",
-                "yes_price",
-                "volume",
-                "liquidity",
-                "raw_url",
-            ]])
+
+            show_df(
+                candidates[
+                    [
+                        "platform",
+                        "market_id",
+                        "title",
+                        "yes_price",
+                        "volume",
+                        "liquidity",
+                        "raw_url",
+                    ]
+                ]
+            )
+
         else:
-            opportunities = opportunities.sort_values(
-                ["spread", "match_score"],
-                ascending=False,
-            ).head(100)
+
+            sort_method = st.selectbox(
+                "Rank Opportunities By",
+                [
+                    "Spread",
+                    "Liquidity",
+                    "Match Score",
+                ],
+            )
+
+            if sort_method == "Spread":
+
+                opportunities = opportunities.sort_values(
+                    "spread",
+                    ascending=False,
+                )
+
+            elif sort_method == "Liquidity":
+
+                opportunities["total_liquidity"] = (
+                    opportunities["liquidity_a"].fillna(0)
+                    + opportunities["liquidity_b"].fillna(0)
+                )
+
+                opportunities = opportunities.sort_values(
+                    "total_liquidity",
+                    ascending=False,
+                )
+
+            else:
+
+                opportunities = opportunities.sort_values(
+                    "match_score",
+                    ascending=False,
+                )
+
+            opportunities = opportunities.head(100)
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Candidates", len(opportunities))
-            c2.metric("Largest Spread", round(opportunities["spread"].max(), 4))
-            c3.metric("Average Spread", round(opportunities["spread"].mean(), 4))
 
-            show_df(opportunities)
+            c1.metric(
+                "Candidates",
+                len(opportunities),
+            )
+
+            c2.metric(
+                "Largest Spread",
+                round(opportunities["spread"].max(), 4),
+            )
+
+            c3.metric(
+                "Average Spread",
+                round(opportunities["spread"].mean(), 4),
+            )
+
+            display_df = opportunities[
+            [
+                "title_a",
+                "title_b",
+                "platform_a",
+                "platform_b",
+                "price_a",
+                "price_b",
+                "spread",
+                "match_score",
+                "volume_a",
+                "volume_b",
+                "liquidity_a",
+                "liquidity_b",
+                "url_a",
+                "url_b",
+            ]
+        ]
+
+            st.dataframe(
+                 display_df,
+                 use_container_width=True,
+                 column_config={
+                     "url_a": st.column_config.LinkColumn("Market A"),
+                    "url_b": st.column_config.LinkColumn("Market B"),
+             },
+           )
+         
 
             st.subheader("Top Opportunity Candidates")
+
             chart_df = opportunities.head(25).copy()
 
             fig = px.bar(
@@ -396,7 +565,11 @@ elif page == "Opportunities":
                 orientation="h",
                 title="Top Cross-Platform Spreads",
             )
-            st.plotly_chart(fig, width="stretch")
+
+            st.plotly_chart(
+                fig,
+                width="stretch",
+            )
 
 
 elif page == "Movers":
