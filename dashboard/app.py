@@ -524,7 +524,13 @@ elif page == "Opportunities":
                 "Average Spread",
                 round(opportunities["spread"].mean(), 4),
             )
+            opportunities["market_a_link"] = opportunities["url_a"].apply(
+                lambda x: x if str(x).startswith("http") else f"https://polymarket.com/market/{x}"
+            )
 
+            opportunities["market_b_link"] = opportunities["url_b"].apply(
+                lambda x: x if str(x).startswith("http") else f"https://www.predictit.org/markets/detail/{x}"
+            )
             display_df = opportunities[
             [
                 "title_a",
@@ -539,19 +545,19 @@ elif page == "Opportunities":
                 "volume_b",
                 "liquidity_a",
                 "liquidity_b",
-                "url_a",
-                "url_b",
+                "market_a_link",
+                "market_b_link",
             ]
         ]
 
             st.dataframe(
-                 display_df,
-                 use_container_width=True,
-                 column_config={
-                     "url_a": st.column_config.LinkColumn("Market A"),
-                    "url_b": st.column_config.LinkColumn("Market B"),
-             },
-           )
+                display_df,
+                use_container_width=True,
+                column_config={
+                    "market_a_link": st.column_config.LinkColumn("Market A"),
+                    "market_b_link": st.column_config.LinkColumn("Market B"),
+                },
+            )
          
 
             st.subheader("Top Opportunity Candidates")
