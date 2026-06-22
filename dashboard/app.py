@@ -4,6 +4,8 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import os
+import stripe
+from dotenv import load_dotenv
 from dotenv import load_dotenv
 from supabase import create_client
 from difflib import SequenceMatcher
@@ -11,11 +13,15 @@ from streamlit_autorefresh import st_autorefresh
 
 load_dotenv()
 
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
 if "user_email" not in st.session_state:
     st.session_state.user_email = None
 
@@ -62,13 +68,20 @@ st.caption("Live cross-platform prediction market data warehouse")
 with st.sidebar:
     st.subheader("Account")
 
-    if st.session_state.user_email:
+    if st.session_state.get("user_email"):
         st.success(st.session_state.user_email)
+
         if st.button("Log out"):
             st.session_state.user_email = None
             st.rerun()
+
     else:
-        auth_mode = st.radio("Account", ["Log in", "Sign up"], horizontal=True)
+        auth_mode = st.radio(
+            "Account",
+            ["Log in", "Sign up"],
+            horizontal=True
+        )
+
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
 
@@ -90,9 +103,14 @@ with st.sidebar:
                         "email": email,
                         "password": password,
                     })
-                    st.session_state.user_email = result.user.email
+
+                    st.session_state.user_email = email
+                    st.session_state.session = result.session
+
                     st.rerun()
+
                 except Exception as e:
+                    st.error(f"Login failed: {e}")
                     st.error(f"Login failed: {e}")
 
 conn = duckdb.connect(DB_PATH, read_only=True)
@@ -325,7 +343,7 @@ elif page == "Platforms":
 
 elif page == "Opportunities":
 
-    if not st.session_state.user_email:
+    if not st.session_state.get("user_email"):
         st.warning("Please log in to view the Opportunity Scanner.")
         st.stop()
 
