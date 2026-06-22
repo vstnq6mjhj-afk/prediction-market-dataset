@@ -3,9 +3,21 @@ import duckdb
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import os
+from dotenv import load_dotenv
+from supabase import create_client
 from difflib import SequenceMatcher
 from streamlit_autorefresh import st_autorefresh
 
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
 
 def similarity(a, b):
     return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
@@ -46,6 +58,42 @@ st.set_page_config(
 
 st.title("Prediction Market Dataset")
 st.caption("Live cross-platform prediction market data warehouse")
+
+with st.sidebar:
+    st.subheader("Account")
+
+    if st.session_state.user_email:
+        st.success(st.session_state.user_email)
+        if st.button("Log out"):
+            st.session_state.user_email = None
+            st.rerun()
+    else:
+        auth_mode = st.radio("Account", ["Log in", "Sign up"], horizontal=True)
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+
+        if auth_mode == "Sign up":
+            if st.button("Create account"):
+                try:
+                    supabase.auth.sign_up({
+                        "email": email,
+                        "password": password,
+                    })
+                    st.success("Account created. You can now log in.")
+                except Exception as e:
+                    st.error(f"Signup failed: {e}")
+
+        if auth_mode == "Log in":
+            if st.button("Log in"):
+                try:
+                    result = supabase.auth.sign_in_with_password({
+                        "email": email,
+                        "password": password,
+                    })
+                    st.session_state.user_email = result.user.email
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
 
 conn = duckdb.connect(DB_PATH, read_only=True)
 
@@ -276,6 +324,11 @@ elif page == "Platforms":
 
 
 elif page == "Opportunities":
+
+    if not st.session_state.user_email:
+        st.warning("Please log in to view the Opportunity Scanner.")
+        st.stop()
+
     st.subheader("Opportunity Scanner")
 
     latest = sql_df("""
