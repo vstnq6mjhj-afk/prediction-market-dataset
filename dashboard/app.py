@@ -71,9 +71,21 @@ with st.sidebar:
     if st.session_state.get("user_email"):
         st.success(st.session_state.user_email)
 
-        if st.button("Log out"):
-            st.session_state.user_email = None
-            st.rerun()
+        if st.button("Upgrade to Pro"):
+            checkout_session = stripe.checkout.Session.create(
+                mode="subscription",
+                payment_method_types=["card"],
+                line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                customer_email=st.session_state.user_email,
+                success_url="http://localhost:8501",
+                cancel_url="http://localhost:8501",
+            )
+
+            st.link_button("Open Stripe Checkout", checkout_session.url)
+
+            if st.button("Log out"):
+                st.session_state.user_email = None
+                st.rerun()
 
     else:
         auth_mode = st.radio(
