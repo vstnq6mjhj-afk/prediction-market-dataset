@@ -1,6 +1,6 @@
 import requests
 from datetime import datetime, timezone
-
+from connectors.title_utils import normalize_title
 
 def _num(value, default=0.0):
     try:
@@ -53,11 +53,13 @@ def fetch_predictit_markets():
 
             previous_price = _price(contract.get("lastClosePrice"))
             price_change = round(abs(yes_price - previous_price), 4) if previous_price else 0.0
+            title = f"{market.get('name','')} | {contract.get('name','')}"
 
             rows.append({
                 "platform": "predictit",
                 "market_id": str(contract.get("id")),
-                "title": f"{market.get('name')} | {contract.get('name')}",
+                "title": title,
+                "canonical_title": normalize_title(title),
                 "category": "politics",
                 "start_date": None,
                 "close_date": market.get("timeStamp"),

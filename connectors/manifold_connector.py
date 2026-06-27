@@ -1,5 +1,6 @@
 import requests
 from datetime import datetime, timezone
+from connectors.title_utils import normalize_title
 
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
@@ -33,10 +34,13 @@ def fetch_manifold_markets(limit=100):
         yes_price = round(prob, 4)
         no_price = round(1 - prob, 4)
 
+        title = m.get("question") or m.get("title") or ""
+
         rows.append({
             "platform": "manifold",
             "market_id": str(m.get("id") or ""),
-            "title": m.get("question") or m.get("title") or "",
+            "title": title,
+            "canonical_title": normalize_title(title),
             "category": (
                 m.get("groupSlugs", ["unknown"])[0]
                 if m.get("groupSlugs")

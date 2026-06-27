@@ -1,5 +1,6 @@
 import requests
 from datetime import datetime, timezone
+from connectors.title_utils import normalize_title
 
 KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -84,10 +85,16 @@ def fetch_kalshi_markets(limit=100):
             default=None,
         )
 
+        title = (
+    market.get("title")
+    or market.get("subtitle")
+    or market.get("ticker")
+)
         rows.append({
             "platform": "kalshi",
             "market_id": market.get("ticker") or market.get("event_ticker"),
-            "title": market.get("title") or market.get("subtitle") or market.get("ticker"),
+            "title": title,
+"canonical_title": normalize_title(title),
             "category": market.get("category") or "unknown",
             "start_date": market.get("open_time"),
             "close_date": market.get("close_time"),

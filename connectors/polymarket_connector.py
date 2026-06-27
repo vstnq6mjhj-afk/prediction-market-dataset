@@ -1,6 +1,6 @@
 import requests
 from datetime import datetime, timezone
-
+from connectors.title_utils import normalize_title
 
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 
@@ -69,12 +69,14 @@ def fetch_polymarket_markets(limit=100):
 
     for market in markets:
         yes_price, no_price = _extract_yes_no_prices(market)
+        title = market.get("question") or market.get("title")
 
         rows.append(
             {
                 "platform": "polymarket",
                 "market_id": market.get("conditionId") or market.get("id"),
-                "title": market.get("question") or market.get("title"),
+                "title": title,
+"canonical_title": normalize_title(title),
                 "category": market.get("category", "unknown"),
                 "start_date": market.get("startDate"),
                 "close_date": market.get("endDate"),

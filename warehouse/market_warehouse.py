@@ -14,10 +14,27 @@ def initialize():
     conn = duckdb.connect(str(DB_PATH))
 
     conn.execute("""
-    CREATE TABLE IF NOT EXISTS market_snapshots AS
-    SELECT *
-    FROM read_csv_auto('data/snapshots/latest.csv')
-    WHERE 1=0
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+        platform VARCHAR,
+        market_id VARCHAR,
+        title VARCHAR,
+        canonical_title VARCHAR,
+        category VARCHAR,
+        start_date VARCHAR,
+        close_date VARCHAR,
+        resolution_date VARCHAR,
+        status VARCHAR,
+        outcome VARCHAR,
+        resolution_source VARCHAR,
+        raw_url VARCHAR,
+        volume DOUBLE,
+        liquidity DOUBLE,
+        yes_price DOUBLE,
+        no_price DOUBLE,
+        source VARCHAR,
+        ingested_at VARCHAR,
+        snapshot_time VARCHAR
+    )
     """)
 
     conn.close()
