@@ -84,7 +84,7 @@ def platform_label(platform: Any) -> str:
 
 
 def open_db() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(DB_PATH, read_only=True)
+    return duckdb.connect(DB_PATH)
 
 
 def sql_df(conn: duckdb.DuckDBPyConnection, query: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:
