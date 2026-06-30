@@ -1,10 +1,14 @@
 from pathlib import Path
 import duckdb
 import pandas as pd
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 
-DB_PATH = ROOT / "data" / "warehouse.duckdb"
+DB_PATH = Path(os.getenv(
+    "DB_PATH",
+    str(ROOT / "data" / "warehouse.duckdb")
+))
 
 
 def initialize():
