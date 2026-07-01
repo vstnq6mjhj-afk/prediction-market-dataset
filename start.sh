@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-
+python restore_db.py
 python - <<'PY'
 from pathlib import Path
 import glob
