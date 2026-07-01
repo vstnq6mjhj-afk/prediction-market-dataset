@@ -49,43 +49,27 @@ def append_snapshot(csv_path):
     conn = duckdb.connect(str(DB_PATH))
 
     df = pd.read_csv(csv_path)
-
     conn.register("snapshot_df", df)
 
     conn.execute("""
     INSERT INTO market_snapshots (
-        platform,
-        market_id,
-        title,
-        canonical_title,
-        category,
-        start_date,
-        close_date,
-        resolution_date,
-        status,
-        outcome,
-        resolution_source,
-        raw_url,
-        volume,
-        liquidity,
-        yes_price,
-        no_price,
-        source,
-        ingested_at,
-        snapshot_time
+        platform, market_id, title, canonical_title, category,
+        start_date, close_date, resolution_date, status, outcome,
+        resolution_source, raw_url, volume, liquidity, yes_price,
+        no_price, source, ingested_at, snapshot_time
     )
     SELECT
         platform,
         market_id,
         title,
-        canonical_title,
+        NULL AS canonical_title,
         category,
         start_date,
         close_date,
         resolution_date,
         status,
         outcome,
-        resolution_source,
+        NULL AS resolution_source,
         raw_url,
         volume,
         liquidity,
