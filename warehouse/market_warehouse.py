@@ -49,36 +49,25 @@ def append_snapshot(csv_path):
     conn = duckdb.connect(str(DB_PATH))
 
     df = pd.read_csv(csv_path)
+
+    required_cols = [
+        "platform", "market_id", "title", "canonical_title", "category",
+        "start_date", "close_date", "resolution_date", "status", "outcome",
+        "resolution_source", "raw_url", "volume", "liquidity", "yes_price",
+        "no_price", "source", "ingested_at", "snapshot_time"
+    ]
+
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[required_cols]
+
     conn.register("snapshot_df", df)
 
     conn.execute("""
-    INSERT INTO market_snapshots (
-        platform, market_id, title, canonical_title, category,
-        start_date, close_date, resolution_date, status, outcome,
-        resolution_source, raw_url, volume, liquidity, yes_price,
-        no_price, source, ingested_at, snapshot_time
-    )
-    SELECT
-        platform,
-        market_id,
-        title,
-        NULL AS canonical_title,
-        category,
-        start_date,
-        close_date,
-        resolution_date,
-        status,
-        outcome,
-        NULL AS resolution_source,
-        raw_url,
-        volume,
-        liquidity,
-        yes_price,
-        no_price,
-        source,
-        ingested_at,
-        snapshot_time
-    FROM snapshot_df
+    INSERT INTO market_snapshots
+    SELECT * FROM snapshot_df
     """)
 
     conn.close()
