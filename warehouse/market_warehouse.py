@@ -18,28 +18,49 @@ def initialize():
     conn = duckdb.connect(str(DB_PATH))
 
     conn.execute("""
-    CREATE TABLE IF NOT EXISTS market_snapshots (
-        platform VARCHAR,
-        market_id VARCHAR,
-        title VARCHAR,
-        canonical_title VARCHAR,
-        category VARCHAR,
-        start_date VARCHAR,
-        close_date VARCHAR,
-        resolution_date VARCHAR,
-        status VARCHAR,
-        outcome VARCHAR,
-        resolution_source VARCHAR,
-        raw_url VARCHAR,
-        volume DOUBLE,
-        liquidity DOUBLE,
-        yes_price DOUBLE,
-        no_price DOUBLE,
-        source VARCHAR,
-        ingested_at VARCHAR,
-        snapshot_time VARCHAR
-    )
-    """)
+INSERT INTO market_snapshots (
+    platform,
+    market_id,
+    title,
+    canonical_title,
+    category,
+    start_date,
+    close_date,
+    resolution_date,
+    status,
+    outcome,
+    resolution_source,
+    raw_url,
+    volume,
+    liquidity,
+    yes_price,
+    no_price,
+    source,
+    ingested_at,
+    snapshot_time
+)
+SELECT
+    platform,
+    market_id,
+    title,
+    canonical_title,
+    category,
+    start_date,
+    close_date,
+    resolution_date,
+    status,
+    outcome,
+    resolution_source,
+    raw_url,
+    volume,
+    liquidity,
+    yes_price,
+    no_price,
+    source,
+    ingested_at,
+    snapshot_time
+FROM snapshot_df
+""")
 
     conn.close()
 
