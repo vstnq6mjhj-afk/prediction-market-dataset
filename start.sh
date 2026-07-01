@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-python verify_db.py
-python - <<'PY'
+
+python - <<'PY' &
+from run_dataset_scheduler import main
+main()
+PY
+
+streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port $PORT
 from pathlib import Path
 import glob
 from warehouse.market_warehouse import initialize, append_snapshot, DB_PATH
