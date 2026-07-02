@@ -9,7 +9,6 @@ __pycache__/
 logs/
 *.log
 data/
-warehouse/
 __pycache__/
 *.pyc
 .env
