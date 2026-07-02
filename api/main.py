@@ -1,117 +1,79 @@
-from pathlib import Path
-import math
+import os
+from typing import Optional
+
 import duckdb
-import pandas as pd
-import numpy as np
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
-ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "data" / "warehouse.duckdb"
+DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
-app = FastAPI(title="Prediction Market Dataset API")
-
-
-def clean_value(v):
-    if v is None:
-        return None
-    if isinstance(v, float):
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        v = float(v)
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    if isinstance(v, pd.Timestamp):
-        return str(v)
-    return v
+app = FastAPI(
+    title="Prediction Market Dataset API",
+    version="1.0.0",
+)
 
 
-def clean_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return clean_json(obj.to_dict(orient="records"))
-    if isinstance(obj, list):
-        return [clean_json(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: clean_json(v) for k, v in obj.items()}
-    return clean_value(obj)
-
-
-def query(sql: str, params=None):
-    conn = duckdb.connect(str(DB_PATH), read_only=True)
+def query_db(sql: str, params=None):
+    conn = duckdb.connect(DB_PATH, read_only=True)
     try:
-        df = conn.execute(sql, params or []).df()
+        if params is None:
+            return conn.execute(sql).fetchdf().to_dict(orient="records")
+        return conn.execute(sql, params).fetchdf().to_dict(orient="records")
     finally:
         conn.close()
 
-    df = df.replace([np.inf, -np.inf], np.nan)
-    return clean_json(df)
+
+@app.get("/v1/health")
+def health():
+    rows = query_db("""
+        SELECT
+            COUNT(*) AS total_rows,
+            COUNT(DISTINCT market_id) AS unique_markets,
+            COUNT(DISTINCT snapshot_time) AS snapshots,
+            MAX(snapshot_time) AS latest_snapshot
+        FROM market_snapshots
+    """)
+    return rows[0]
 
 
-@app.get("/")
-def home():
-    return {
-        "status": "ok",
-        "name": "Prediction Market Dataset API",
-    }
+@app.get("/v1/latest")
+def latest(
+    platform: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+):
+    where = ""
+    params = [limit]
 
+    if platform:
+        where = "AND platform = ?"
+        params = [platform, limit]
 
-@app.get("/stats")
-def stats():
-    conn = duckdb.connect(str(DB_PATH), read_only=True)
-    try:
-        total_rows = conn.execute("""
-            SELECT COUNT(*) FROM market_snapshots
-        """).fetchone()[0]
-
-        unique_markets = conn.execute("""
-            SELECT COUNT(DISTINCT platform || ':' || market_id)
+    return query_db(f"""
+        WITH latest AS (
+            SELECT *
             FROM market_snapshots
-        """).fetchone()[0]
-
-        snapshots = conn.execute("""
-            SELECT COUNT(DISTINCT snapshot_time)
-            FROM market_snapshots
-        """).fetchone()[0]
-
-        latest_snapshot = conn.execute("""
-            SELECT MAX(snapshot_time)
-            FROM market_snapshots
-        """).fetchone()[0]
-    finally:
-        conn.close()
-
-    return clean_json({
-        "total_rows": total_rows,
-        "unique_markets": unique_markets,
-        "snapshots": snapshots,
-        "latest_snapshot": latest_snapshot,
-    })
+            WHERE snapshot_time = (
+                SELECT MAX(snapshot_time)
+                FROM market_snapshots
+            )
+        )
+        SELECT *
+        FROM latest
+        WHERE 1=1
+        {where}
+        ORDER BY volume DESC NULLS LAST
+        LIMIT ?
+    """, params)
 
 
-@app.get("/platforms")
+@app.get("/v1/platforms")
 def platforms():
-    return query("""
+    return query_db("""
         SELECT
             platform,
             COUNT(*) AS rows,
-            COUNT(DISTINCT platform || ':' || market_id) AS unique_markets,
-
-            CASE
-                WHEN SUM(CASE WHEN volume IS NOT NULL AND volume > 0 THEN 1 ELSE 0 END) = 0
-                THEN NULL
-                ELSE ROUND(AVG(CASE WHEN volume > 0 THEN volume ELSE NULL END), 4)
-            END AS avg_volume,
-
-            CASE
-                WHEN SUM(CASE WHEN liquidity IS NOT NULL AND liquidity > 0 THEN 1 ELSE 0 END) = 0
-                THEN NULL
-                ELSE ROUND(AVG(CASE WHEN liquidity > 0 THEN liquidity ELSE NULL END), 4)
-            END AS avg_liquidity,
-
+            COUNT(DISTINCT market_id) AS unique_markets,
+            AVG(volume) AS avg_volume,
+            AVG(liquidity) AS avg_liquidity,
             MIN(snapshot_time) AS first_snapshot,
             MAX(snapshot_time) AS latest_snapshot
         FROM market_snapshots
@@ -120,192 +82,85 @@ def platforms():
     """)
 
 
-@app.get("/markets")
+@app.get("/v1/markets")
 def markets(
-    platform: str | None = None,
-    search: str | None = None,
+    q: Optional[str] = None,
+    platform: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
 ):
     filters = []
     params = []
 
+    if q:
+        filters.append("LOWER(title) LIKE ?")
+        params.append(f"%{q.lower()}%")
+
     if platform:
         filters.append("platform = ?")
         params.append(platform)
 
-    if search:
-        filters.append("LOWER(title) LIKE ?")
-        params.append(f"%{search.lower()}%")
-
-    where_clause = ""
-    if filters:
-        where_clause = "WHERE " + " AND ".join(filters)
+    where = "WHERE " + " AND ".join(filters) if filters else ""
 
     params.append(limit)
 
-    return query(f"""
-        WITH latest AS (
-            SELECT *
-            FROM market_snapshots
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY platform, market_id
-                ORDER BY snapshot_time DESC
-            ) = 1
-        )
+    return query_db(f"""
         SELECT
             platform,
             market_id,
             title,
-            category,
-            status,
             yes_price,
             no_price,
             volume,
             liquidity,
-            outcome,
-            resolution_source,
-            close_time,
+            status,
             snapshot_time,
             raw_url
-        FROM latest
-        {where_clause}
+        FROM market_snapshots
+        {where}
         ORDER BY snapshot_time DESC
         LIMIT ?
     """, params)
 
 
-@app.get("/market/{market_id}")
+@app.get("/v1/market/{market_id}")
 def market_detail(market_id: str):
-    return query("""
-        SELECT
-            snapshot_time,
-            platform,
-            market_id,
-            title,
-            yes_price,
-            no_price,
-            volume,
-            liquidity,
-            status,
-            outcome,
-            resolution_source,
-            raw_url,
-            ingested_at,
-            close_time
+    rows = query_db("""
+        SELECT *
         FROM market_snapshots
         WHERE market_id = ?
         ORDER BY snapshot_time
     """, [market_id])
 
+    if not rows:
+        raise HTTPException(status_code=404, detail="Market not found")
 
-@app.get("/top-volume")
-def top_volume(limit: int = Query(50, ge=1, le=500)):
-    return query("""
-        WITH latest AS (
-            SELECT *
-            FROM market_snapshots
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY platform, market_id
-                ORDER BY snapshot_time DESC
-            ) = 1
-        )
-        SELECT
-            platform,
-            market_id,
-            title,
-            yes_price,
-            no_price,
-            volume,
-            liquidity,
-            snapshot_time
-        FROM latest
-        WHERE volume IS NOT NULL
-          AND volume > 0
-        ORDER BY volume DESC
-        LIMIT ?
-    """, [limit])
+    return rows
 
 
-@app.get("/movers")
-def movers(limit: int = Query(50, ge=1, le=500)):
-    return query("""
-        WITH per_market AS (
+@app.get("/v1/movers")
+def movers(limit: int = Query(100, ge=1, le=500)):
+    return query_db("""
+        WITH market_changes AS (
             SELECT
                 platform,
                 market_id,
-                ANY_VALUE(title) AS title,
-                MIN(yes_price) AS low_price,
-                MAX(yes_price) AS high_price,
-                MAX(yes_price) - MIN(yes_price) AS price_change,
-                MIN(volume) AS low_volume,
-                MAX(volume) AS high_volume,
-                CASE
-                    WHEN MIN(volume) IS NULL OR MAX(volume) IS NULL
-                    THEN NULL
-                    ELSE MAX(volume) - MIN(volume)
-                END AS volume_change,
-                COUNT(*) AS snapshots
+                title,
+                COUNT(*) AS snapshots,
+                FIRST(yes_price ORDER BY snapshot_time) AS first_price,
+                LAST(yes_price ORDER BY snapshot_time) AS last_price,
+                LAST(yes_price ORDER BY snapshot_time)
+                    - FIRST(yes_price ORDER BY snapshot_time) AS price_change,
+                LAST(volume ORDER BY snapshot_time)
+                    - FIRST(volume ORDER BY snapshot_time) AS volume_change,
+                LAST(liquidity ORDER BY snapshot_time)
+                    - FIRST(liquidity ORDER BY snapshot_time) AS liquidity_change
             FROM market_snapshots
             WHERE yes_price IS NOT NULL
-            GROUP BY platform, market_id
+            GROUP BY platform, market_id, title
+            HAVING COUNT(*) >= 3
         )
-        SELECT
-            platform,
-            market_id,
-            title,
-            low_price,
-            high_price,
-            ROUND(price_change, 4) AS price_change,
-            volume_change,
-            snapshots
-        FROM per_market
-        ORDER BY price_change DESC NULLS LAST
-        LIMIT ?
-    """, [limit])
-
-
-@app.get("/snapshot-growth")
-def snapshot_growth():
-    return query("""
-        SELECT
-            snapshot_time,
-            COUNT(*) AS rows
-        FROM market_snapshots
-        GROUP BY snapshot_time
-        ORDER BY snapshot_time
-    """)
-
-
-@app.get("/latest-snapshot")
-def latest_snapshot(limit: int = Query(300, ge=1, le=3000)):
-    return query("""
-        WITH latest_time AS (
-            SELECT MAX(snapshot_time) AS latest_snapshot
-            FROM market_snapshots
-        )
-        SELECT
-            platform,
-            market_id,
-            title,
-            category,
-            start_date,
-            close_date,
-            resolution_date,
-            status,
-            outcome,
-            resolution_source,
-            raw_url,
-            volume,
-            liquidity,
-            yes_price,
-            no_price,
-            source,
-            ingested_at,
-            snapshot_time
-        FROM market_snapshots
-        WHERE snapshot_time = (
-            SELECT latest_snapshot FROM latest_time
-        )
-        ORDER BY platform, volume DESC NULLS LAST
+        SELECT *
+        FROM market_changes
+        ORDER BY ABS(price_change) DESC NULLS LAST
         LIMIT ?
     """, [limit])
