@@ -31,7 +31,8 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 st.set_page_config(page_title="Prediction Market Dataset", layout="wide")
-st_autorefresh(interval=300_000, key="dashboard_refresh")
+st_autorefresh(interval=60 * 1000, limit=None, key="live_dashboard_refresh")
+st.caption(f"Auto-refresh heartbeat: {pd.Timestamp.utcnow()}")
 
 
 # =========================
