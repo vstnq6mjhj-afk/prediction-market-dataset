@@ -10,6 +10,7 @@ PIPELINE = [
     "ingestion.stage39_live_market_data",
     "ingestion.stage41_snapshot_validator",
     "ingestion.stage47_schema_enforcer",
+    "warehouse.append_latest_snapshot",
 ]
 
 env = os.environ.copy()
