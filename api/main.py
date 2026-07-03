@@ -2,7 +2,8 @@ import os
 from typing import Optional
 
 import duckdb
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from api.auth import verify_api_key
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
@@ -23,7 +24,7 @@ def query_db(sql: str, params=None):
 
 
 @app.get("/v1/health")
-def health():
+def health(account = Depends(verify_api_key)):
     rows = query_db("""
         SELECT
             COUNT(*) AS total_rows,
@@ -36,10 +37,9 @@ def health():
 
 
 @app.get("/v1/latest")
-def latest(
+def latest(account = Depends(verify_api_key)):
     platform: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
-):
     where = ""
     params = [limit]
 
@@ -66,7 +66,7 @@ def latest(
 
 
 @app.get("/v1/platforms")
-def platforms():
+def platforms(account = Depends(verify_api_key)):
     return query_db("""
         SELECT
             platform,
@@ -83,11 +83,10 @@ def platforms():
 
 
 @app.get("/v1/markets")
-def markets(
+def markets(account = Depends(verify_api_key)):
     q: Optional[str] = None,
     platform: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
-):
     filters = []
     params = []
 
