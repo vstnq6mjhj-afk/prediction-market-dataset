@@ -3,7 +3,10 @@ from typing import Optional
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Query
+
 from api.auth import verify_api_key
+from api.usage import log_api_request
+from api.supabase_client import supabase
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
@@ -24,7 +27,7 @@ def query_db(sql: str, params=None):
 
 
 @app.get("/v1/health")
-def health(account = Depends(verify_api_key)):
+def health(account=Depends(verify_api_key)):
     rows = query_db("""
         SELECT
             COUNT(*) AS total_rows,
@@ -33,13 +36,17 @@ def health(account = Depends(verify_api_key)):
             MAX(snapshot_time) AS latest_snapshot
         FROM market_snapshots
     """)
+
+    log_api_request(account["api_key"], "/v1/health", 200, 1)
     return rows[0]
 
 
 @app.get("/v1/latest")
-def latest(account = Depends(verify_api_key)):
+def latest(
+    account=Depends(verify_api_key),
     platform: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
+):
     where = ""
     params = [limit]
 
@@ -47,7 +54,7 @@ def latest(account = Depends(verify_api_key)):
         where = "AND platform = ?"
         params = [platform, limit]
 
-    return query_db(f"""
+    rows = query_db(f"""
         WITH latest AS (
             SELECT *
             FROM market_snapshots
@@ -64,10 +71,13 @@ def latest(account = Depends(verify_api_key)):
         LIMIT ?
     """, params)
 
+    log_api_request(account["api_key"], "/v1/latest", 200, len(rows))
+    return rows
+
 
 @app.get("/v1/platforms")
-def platforms(account = Depends(verify_api_key)):
-    return query_db("""
+def platforms(account=Depends(verify_api_key)):
+    rows = query_db("""
         SELECT
             platform,
             COUNT(*) AS rows,
@@ -81,12 +91,17 @@ def platforms(account = Depends(verify_api_key)):
         ORDER BY rows DESC
     """)
 
+    log_api_request(account["api_key"], "/v1/platforms", 200, len(rows))
+    return rows
+
 
 @app.get("/v1/markets")
-def markets(account = Depends(verify_api_key)):
+def markets(
+    account=Depends(verify_api_key),
     q: Optional[str] = None,
     platform: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
+):
     filters = []
     params = []
 
@@ -102,7 +117,7 @@ def markets(account = Depends(verify_api_key)):
 
     params.append(limit)
 
-    return query_db(f"""
+    rows = query_db(f"""
         SELECT
             platform,
             market_id,
@@ -120,9 +135,15 @@ def markets(account = Depends(verify_api_key)):
         LIMIT ?
     """, params)
 
+    log_api_request(account["api_key"], "/v1/markets", 200, len(rows))
+    return rows
+
 
 @app.get("/v1/market/{market_id}")
-def market_detail(market_id: str):
+def market_detail(
+    market_id: str,
+    account=Depends(verify_api_key),
+):
     rows = query_db("""
         SELECT *
         FROM market_snapshots
@@ -133,12 +154,16 @@ def market_detail(market_id: str):
     if not rows:
         raise HTTPException(status_code=404, detail="Market not found")
 
+    log_api_request(account["api_key"], f"/v1/market/{market_id}", 200, len(rows))
     return rows
 
 
 @app.get("/v1/movers")
-def movers(limit: int = Query(100, ge=1, le=500)):
-    return query_db("""
+def movers(
+    account=Depends(verify_api_key),
+    limit: int = Query(100, ge=1, le=500),
+):
+    rows = query_db("""
         WITH market_changes AS (
             SELECT
                 platform,
@@ -163,3 +188,17 @@ def movers(limit: int = Query(100, ge=1, le=500)):
         ORDER BY ABS(price_change) DESC NULLS LAST
         LIMIT ?
     """, [limit])
+
+    log_api_request(account["api_key"], "/v1/movers", 200, len(rows))
+    return rows
+
+@app.get("/v1/account")
+def account(account=Depends(verify_api_key)):
+    return {
+        "email": account["email"],
+        "plan": account["tier"],
+        "requests_today": account["requests_today"],
+        "daily_limit": account["daily_limit"],
+        "remaining": account["remaining"],
+        "api_key": account["api_key"][:8] + "..."
+    }
