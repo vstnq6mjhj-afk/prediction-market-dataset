@@ -21,6 +21,7 @@ load_dotenv()
 
 DB_PATH = os.getenv("DB_PATH", "data/warehouse.duckdb")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://prediction-market-dataset-api.onrender.com")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_PRO_PRICE_ID = os.getenv("STRIPE_PRO_PRICE_ID")
@@ -97,6 +98,22 @@ def sql_df(conn: duckdb.DuckDBPyConnection, query: str, params: Optional[Iterabl
 # =========================
 # Subscription/auth functions
 # =========================
+
+
+def get_account_api_status(api_key: str) -> Optional[Dict[str, Any]]:
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/v1/account",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        return response.json()
+    except Exception:
+        return None
 
 
 def get_subscription_status(email: Optional[str]) -> str:
@@ -1213,40 +1230,79 @@ try:
 
         st.success("✅ API Pro Active")
 
+        # Temporary until per-user API key creation is connected.
+        # This key is read by the production API from the Supabase api_keys table.
+        api_key = "pmd_demo_key"
+        account_status = get_account_api_status(api_key)
+
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Status", "Online")
         col2.metric("Version", "v1")
-        col3.metric("Daily Limit", "5,000")
+        col3.metric(
+            "Daily Limit",
+            f"{account_status.get('daily_limit', 0):,}" if account_status else "—",
+        )
         col4.metric("Format", "JSON")
 
         st.divider()
 
-        st.subheader("Your API Key")
-        api_key = f"pmd_live_{current_email.replace('@', '_').replace('.', '_')[:16]}"
+        st.subheader("Your API Access")
 
-        st.text_input(
-            "API Key",
-            value=api_key,
-            disabled=True,
-        )
-        st.caption("Use this key in the Authorization header.")
+        if account_status:
+            usage_col1, usage_col2, usage_col3 = st.columns(3)
+            usage_col1.metric("Requests Today", f"{account_status['requests_today']:,}")
+            usage_col2.metric("Daily Limit", f"{account_status['daily_limit']:,}")
+            usage_col3.metric("Remaining", f"{account_status['remaining']:,}")
 
-        st.code(
-            """Authorization: Bearer YOUR_API_KEY
+            if account_status.get("daily_limit"):
+                used_ratio = account_status["requests_today"] / account_status["daily_limit"]
+                st.progress(min(used_ratio, 1.0))
+
+            st.text_input(
+                "API Key",
+                value=api_key,
+                disabled=True,
+            )
+
+            st.caption("Use this key in the Authorization header:")
+            st.code(
+                f"""Authorization: Bearer {api_key}
 Accept: application/json""",
-            language="text",
-        )
+                language="text",
+            )
+
+            st.caption(
+                f"Account: {account_status.get('email', current_email)} · "
+                f"Plan: {account_status.get('plan', 'api')}"
+            )
+        else:
+            st.error("Could not load API account status from the production API.")
+            st.info("Confirm the API service is live and that pmd_demo_key exists in Supabase api_keys.")
+
+            st.text_input(
+                "API Key",
+                value=api_key,
+                disabled=True,
+            )
+
+            st.code(
+                f"""Authorization: Bearer {api_key}
+Accept: application/json""",
+                language="text",
+            )
+
+        st.divider()
 
         st.subheader("Available Endpoints")
         endpoints = pd.DataFrame(
             [
+                ["GET /v1/account", "Current API account, plan, and usage"],
+                ["GET /v1/health", "Dataset health"],
                 ["GET /v1/latest", "Latest market snapshots"],
                 ["GET /v1/platforms", "Platform statistics"],
                 ["GET /v1/markets", "Search markets"],
-                ["GET /v1/comparisons", "Cross-platform comparisons"],
                 ["GET /v1/market/{market_id}", "Market history"],
                 ["GET /v1/movers", "Biggest movers"],
-                ["GET /v1/health", "Dataset health"],
             ],
             columns=["Endpoint", "Description"],
         )
@@ -1254,9 +1310,43 @@ Accept: application/json""",
 
         st.subheader("Example Request")
         st.code(
-            """curl -H "Authorization: Bearer YOUR_API_KEY" \\
-https://api.predictionmarketdataset.com/v1/latest""",
+            f"""curl -H "Authorization: Bearer {api_key}" \\
+{API_BASE_URL}/v1/latest?limit=10""",
             language="bash",
+        )
+
+        st.subheader("Python Example")
+        st.code(
+            f"""import requests
+
+headers = {{
+    "Authorization": "Bearer {api_key}"
+}}
+
+response = requests.get(
+    "{API_BASE_URL}/v1/latest?limit=10",
+    headers=headers
+)
+
+print(response.json())
+""",
+            language="python",
+        )
+
+        st.subheader("JavaScript Example")
+        st.code(
+            f"""fetch(
+    "{API_BASE_URL}/v1/latest?limit=10",
+    {{
+        headers: {{
+            Authorization: "Bearer {api_key}"
+        }}
+    }}
+)
+.then(r => r.json())
+.then(console.log);
+""",
+            language="javascript",
         )
 
         st.subheader("Example JSON Response")
@@ -1271,40 +1361,6 @@ https://api.predictionmarketdataset.com/v1/latest""",
                 "liquidity": 428000.00,
                 "snapshot_time": "2026-06-27T10:15:00Z",
             }
-        )
-
-        st.subheader("Python Example")
-        st.code(
-            """import requests
-
-headers = {
-    "Authorization": "Bearer YOUR_API_KEY"
-}
-
-response = requests.get(
-    "https://api.predictionmarketdataset.com/v1/latest",
-    headers=headers
-)
-
-print(response.json())
-""",
-            language="python",
-        )
-
-        st.subheader("JavaScript Example")
-        st.code(
-            """fetch(
-    "https://api.predictionmarketdataset.com/v1/latest",
-    {
-        headers: {
-            Authorization: "Bearer YOUR_API_KEY"
-        }
-    }
-)
-.then(r => r.json())
-.then(console.log);
-""",
-            language="javascript",
         )
 
         st.subheader("Download Latest Dataset")
