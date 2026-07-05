@@ -1233,7 +1233,7 @@ try:
 
         # Temporary until per-user API key creation is connected.
         # This key is read by the production API from the Supabase api_keys table.
-        api_key = "pmd_demo_key"
+        api_key = "pmd_live_1ssFR6C3O3sh6C0oOkxzh876vv7dA8bcXh3LJXajZjI"
         account_status = get_account_api_status(api_key)
 
         col1, col2, col3, col4 = st.columns(4)
