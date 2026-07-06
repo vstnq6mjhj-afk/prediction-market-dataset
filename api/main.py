@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from api.auth import verify_api_key
 from api.usage import log_api_request
 from api.supabase_client import supabase
+from api.keygen import generate_api_key
+from api.supabase_client import supabase
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
@@ -20,8 +22,12 @@ def query_db(sql: str, params=None):
     conn = duckdb.connect(DB_PATH, read_only=True)
     try:
         if params is None:
-            return conn.execute(sql).fetchdf().to_dict(orient="records")
-        return conn.execute(sql, params).fetchdf().to_dict(orient="records")
+            df = conn.execute(sql).fetchdf()
+        else:
+            df = conn.execute(sql, params).fetchdf()
+
+        df = df.astype(object).where(df.notna(), None)
+        return df.to_dict(orient="records")
     finally:
         conn.close()
 
@@ -201,4 +207,19 @@ def account(account=Depends(verify_api_key)):
         "daily_limit": account["daily_limit"],
         "remaining": account["remaining"],
         "api_key": account["api_key"][:8] + "..."
+    }
+
+@app.post("/v1/api-key/regenerate")
+def regenerate_api_key(account=Depends(verify_api_key)):
+    new_key = generate_api_key()
+
+    supabase.table("api_keys").update(
+        {"api_key": new_key}
+    ).eq(
+        "api_key", account["api_key"]
+    ).execute()
+
+    return {
+        "api_key": new_key,
+        "message": "API key regenerated successfully"
     }
