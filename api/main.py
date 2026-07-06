@@ -257,3 +257,24 @@ def market_detail(
 
     log_api_request(account["api_key"], "/v1/market", 200, len(rows))
     return rows
+
+@app.get("/v1/search")
+def search(
+    q: str,
+    account=Depends(verify_api_key),
+    limit: int = Query(50, ge=1, le=200),
+):
+    rows = query_db("""
+        SELECT *
+        FROM market_snapshots
+        WHERE LOWER(title) LIKE LOWER(?)
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY platform, market_id
+            ORDER BY snapshot_time DESC
+        ) = 1
+        ORDER BY snapshot_time DESC
+        LIMIT ?
+    """, [f"%{q}%", limit])
+
+    log_api_request(account["api_key"], "/v1/search", 200, len(rows))
+    return rows
