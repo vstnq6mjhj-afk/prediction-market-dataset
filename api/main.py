@@ -242,3 +242,18 @@ def regenerate_api_key(account=Depends(verify_api_key)):
         "api_key": new_key,
         "message": "API key regenerated successfully"
     }
+
+@app.get("/v1/market/{market_id}")
+def market_detail(
+    market_id: str,
+    account=Depends(verify_api_key),
+):
+    rows = query_db("""
+        SELECT *
+        FROM market_snapshots
+        WHERE market_id = ?
+        ORDER BY snapshot_time DESC
+    """, [market_id])
+
+    log_api_request(account["api_key"], "/v1/market", 200, len(rows))
+    return rows
