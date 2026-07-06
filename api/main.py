@@ -278,3 +278,20 @@ def search(
 
     log_api_request(account["api_key"], "/v1/search", 200, len(rows))
     return rows
+
+@app.get("/v1/categories")
+def categories(account=Depends(verify_api_key)):
+    rows = query_db("""
+        SELECT
+            LOWER(COALESCE(category, 'unknown')) AS category,
+            COUNT(*) AS markets
+        FROM (
+            SELECT DISTINCT platform, market_id, category
+            FROM market_snapshots
+        )
+        GROUP BY category
+        ORDER BY markets DESC
+    """)
+
+    log_api_request(account["api_key"], "/v1/categories", 200, len(rows))
+    return rows
