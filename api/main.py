@@ -180,24 +180,30 @@ def movers(
     limit: int = Query(100, ge=1, le=500),
 ):
     rows = query_db("""
-        WITH market_changes AS (
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS max_time
+            FROM market_snapshots
+        ),
+        recent AS (
+            SELECT *
+            FROM market_snapshots
+            WHERE snapshot_time >= (SELECT max_time FROM latest) - INTERVAL '7 days'
+              AND yes_price IS NOT NULL
+        ),
+        market_changes AS (
             SELECT
                 platform,
                 market_id,
                 title,
                 COUNT(*) AS snapshots,
-                FIRST(yes_price ORDER BY snapshot_time) AS first_price,
-                LAST(yes_price ORDER BY snapshot_time) AS last_price,
-                LAST(yes_price ORDER BY snapshot_time)
-                    - FIRST(yes_price ORDER BY snapshot_time) AS price_change,
-                LAST(volume ORDER BY snapshot_time)
-                    - FIRST(volume ORDER BY snapshot_time) AS volume_change,
-                LAST(liquidity ORDER BY snapshot_time)
-                    - FIRST(liquidity ORDER BY snapshot_time) AS liquidity_change
-            FROM market_snapshots
-            WHERE yes_price IS NOT NULL
+                MIN(yes_price) AS min_price,
+                MAX(yes_price) AS max_price,
+                MAX(yes_price) - MIN(yes_price) AS price_change,
+                MAX(volume) - MIN(volume) AS volume_change,
+                MAX(liquidity) - MIN(liquidity) AS liquidity_change
+            FROM recent
             GROUP BY platform, market_id, title
-            HAVING COUNT(*) >= 3
+            HAVING COUNT(*) >= 2
         )
         SELECT *
         FROM market_changes
