@@ -2,6 +2,8 @@ import os
 from typing import Optional
 
 import duckdb
+import math
+import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query
 
 from api.auth import verify_api_key
@@ -26,8 +28,16 @@ def query_db(sql: str, params=None):
         else:
             df = conn.execute(sql, params).fetchdf()
 
-        df = df.astype(object).where(df.notna(), None)
-        return df.to_dict(orient="records")
+        records = df.to_dict(orient="records")
+
+        for row in records:
+            for key, value in row.items():
+                if pd.isna(value):
+                    row[key] = None
+                elif isinstance(value, float) and math.isinf(value):
+                    row[key] = None
+
+        return records
     finally:
         conn.close()
 
