@@ -180,33 +180,43 @@ def movers(
     limit: int = Query(100, ge=1, le=500),
 ):
     rows = query_db("""
-        WITH latest AS (
-            SELECT MAX(snapshot_time) AS max_time
-            FROM market_snapshots
-        ),
-        recent AS (
-            SELECT *
-            FROM market_snapshots
-            WHERE snapshot_time >= (SELECT max_time FROM latest) - INTERVAL '7 days'
-              AND yes_price IS NOT NULL
-        ),
-        market_changes AS (
+        WITH ranked AS (
             SELECT
                 platform,
                 market_id,
                 title,
-                COUNT(*) AS snapshots,
-                MIN(yes_price) AS min_price,
-                MAX(yes_price) AS max_price,
-                MAX(yes_price) - MIN(yes_price) AS price_change,
-                MAX(volume) - MIN(volume) AS volume_change,
-                MAX(liquidity) - MIN(liquidity) AS liquidity_change
-            FROM recent
-            GROUP BY platform, market_id, title
-            HAVING COUNT(*) >= 2
+                snapshot_time,
+                yes_price,
+                volume,
+                liquidity,
+                ROW_NUMBER() OVER (
+                    PARTITION BY platform, market_id
+                    ORDER BY snapshot_time DESC
+                ) AS rn
+            FROM market_snapshots
+            WHERE yes_price IS NOT NULL
+        ),
+        paired AS (
+            SELECT
+                latest.platform,
+                latest.market_id,
+                latest.title,
+                latest.yes_price AS latest_price,
+                previous.yes_price AS previous_price,
+                latest.yes_price - previous.yes_price AS price_change,
+                latest.volume - previous.volume AS volume_change,
+                latest.liquidity - previous.liquidity AS liquidity_change,
+                latest.snapshot_time AS latest_snapshot,
+                previous.snapshot_time AS previous_snapshot
+            FROM ranked latest
+            JOIN ranked previous
+              ON latest.platform = previous.platform
+             AND latest.market_id = previous.market_id
+            WHERE latest.rn = 1
+              AND previous.rn = 2
         )
         SELECT *
-        FROM market_changes
+        FROM paired
         ORDER BY ABS(price_change) DESC NULLS LAST
         LIMIT ?
     """, [limit])
