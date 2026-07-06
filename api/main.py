@@ -283,10 +283,13 @@ def search(
 def categories(account=Depends(verify_api_key)):
     rows = query_db("""
         SELECT
-            LOWER(COALESCE(category, 'unknown')) AS category,
+            LOWER(COALESCE(NULLIF(TRIM(category), ''), 'unknown')) AS category,
             COUNT(*) AS markets
         FROM (
-            SELECT DISTINCT platform, market_id, category
+            SELECT DISTINCT
+                platform,
+                market_id,
+                LOWER(COALESCE(NULLIF(TRIM(category), ''), 'unknown')) AS category
             FROM market_snapshots
         )
         GROUP BY category
