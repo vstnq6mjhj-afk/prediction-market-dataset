@@ -5,6 +5,7 @@ import duckdb
 import math
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses  import HTMLResponse
 
 from api.auth import verify_api_key
 from api.usage import log_api_request
@@ -314,22 +315,170 @@ def stats(account=Depends(verify_api_key)):
     log_api_request(account["api_key"], "/v1/stats", 200, 1)
     return row
 
-@app.get("/", include_in_schema=False)
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
-    return {
-        "name": "Prediction Market Dataset API",
-        "status": "online",
-        "version": "v1",
-        "docs": "https://prediction-market-dataset-api.onrender.com/docs",
-        "endpoints": [
-            "/v1/health",
-            "/v1/stats",
-            "/v1/latest",
-            "/v1/search",
-            "/v1/market/{market_id}",
-            "/v1/platforms",
-            "/v1/movers",
-            "/v1/categories",
-            "/v1/account",
-        ],
-    }
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Prediction Market Dataset API</title>
+        <style>
+            body {
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: #0b1020;
+                color: #f8fafc;
+            }
+            .container {
+                max-width: 1100px;
+                margin: auto;
+                padding: 60px 24px;
+            }
+            .hero {
+                text-align: center;
+                padding: 70px 0;
+            }
+            h1 {
+                font-size: 56px;
+                margin-bottom: 16px;
+            }
+            p {
+                color: #cbd5e1;
+                font-size: 18px;
+                line-height: 1.6;
+            }
+            .buttons a {
+                display: inline-block;
+                margin: 12px;
+                padding: 14px 22px;
+                border-radius: 8px;
+                text-decoration: none;
+                font-weight: bold;
+            }
+            .primary {
+                background: #38bdf8;
+                color: #020617;
+            }
+            .secondary {
+                border: 1px solid #475569;
+                color: #f8fafc;
+            }
+            .stats, .features, .pricing {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 20px;
+                margin-top: 40px;
+            }
+            .card {
+                background: #111827;
+                border: 1px solid #1e293b;
+                padding: 24px;
+                border-radius: 14px;
+            }
+            .price {
+                font-size: 34px;
+                font-weight: bold;
+                color: #38bdf8;
+            }
+            code {
+                display: block;
+                background: #020617;
+                border: 1px solid #1e293b;
+                padding: 20px;
+                border-radius: 12px;
+                overflow-x: auto;
+                color: #a7f3d0;
+            }
+            footer {
+                margin-top: 70px;
+                text-align: center;
+                color: #64748b;
+            }
+            @media (max-width: 800px) {
+                h1 { font-size: 38px; }
+                .stats, .features, .pricing {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <section class="hero">
+                <h1>Prediction Market Dataset API</h1>
+                <p>
+                    Unified historical and live prediction market data from
+                    Polymarket, Kalshi, Manifold, and PredictIt.
+                </p>
+                <div class="buttons">
+                    <a class="primary" href="/docs">View API Docs</a>
+                    <a class="secondary" href="#pricing">View Pricing</a>
+                </div>
+            </section>
+
+            <section class="stats">
+                <div class="card">
+                    <h2>4.7M+</h2>
+                    <p>Market snapshots collected</p>
+                </div>
+                <div class="card">
+                    <h2>470K+</h2>
+                    <p>Unique prediction markets</p>
+                </div>
+                <div class="card">
+                    <h2>4</h2>
+                    <p>Supported platforms</p>
+                </div>
+            </section>
+
+            <h2>Built for developers, researchers, and data teams</h2>
+            <section class="features">
+                <div class="card">
+                    <h3>Unified API</h3>
+                    <p>Query multiple prediction market platforms through one normalized API.</p>
+                </div>
+                <div class="card">
+                    <h3>Historical Data</h3>
+                    <p>Access market history, snapshots, prices, volume, and liquidity.</p>
+                </div>
+                <div class="card">
+                    <h3>Search & Discovery</h3>
+                    <p>Search markets by keyword and browse categories, movers, and platforms.</p>
+                </div>
+            </section>
+
+            <h2>Example Request</h2>
+            <code>
+GET /v1/search?q=bitcoin<br>
+Authorization: Bearer YOUR_API_KEY
+            </code>
+
+            <h2 id="pricing">Pricing</h2>
+            <section class="pricing">
+                <div class="card">
+                    <h3>Developer</h3>
+                    <div class="price">$19/mo</div>
+                    <p>For testing, prototypes, and individual developers.</p>
+                    <p>Monthly, 3-month, 6-month, and annual billing available.</p>
+                </div>
+                <div class="card">
+                    <h3>Professional</h3>
+                    <div class="price">$49/mo</div>
+                    <p>For production applications, research teams, and serious users.</p>
+                    <p>Higher limits and priority feature access.</p>
+                </div>
+                <div class="card">
+                    <h3>Enterprise</h3>
+                    <div class="price">Custom</div>
+                    <p>For companies, funds, universities, and data teams.</p>
+                    <p>Custom limits, exports, and support.</p>
+                </div>
+            </section>
+
+            <footer>
+                Prediction Market Dataset API · Live cross-platform market data
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
