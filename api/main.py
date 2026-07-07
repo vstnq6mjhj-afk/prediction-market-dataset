@@ -488,17 +488,150 @@ def dashboard(email: str):
     if not row:
         return "<h1>No API key found</h1>"
 
+    requests_today = row.get("requests_today", 0) or 0
+    daily_limit = row.get("daily_limit", 100) or 100
+    usage_pct = min(int((requests_today / daily_limit) * 100), 100)
+
     return f"""
-    <h1>Prediction Market Dataset Dashboard</h1>
-    <p><b>Email:</b> {row["email"]}</p>
-    <p><b>Plan:</b> {row["plan"]}</p>
-    <p><b>Status:</b> {row.get("subscription_status", "free")}</p>
-    <p><b>Requests Today:</b> {row.get("requests_today", 0)}</p>
-    <p><b>Daily Limit:</b> {row.get("daily_limit", 100)}</p>
-    <p><b>API Key:</b></p>
-    <code>{row["api_key"]}</code>
-    <p><a href="/docs">View API Docs</a></p>
-    """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Dashboard</title>
+<style>
+body {{
+    margin:0;
+    background:#0b1020;
+    font-family:Arial,sans-serif;
+    color:white;
+}}
+.container {{
+    max-width:1100px;
+    margin:auto;
+    padding:50px 24px;
+}}
+.header {{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:35px;
+}}
+h1 {{
+    font-size:42px;
+    margin:0;
+}}
+a {{
+    color:#38bdf8;
+    text-decoration:none;
+}}
+.grid {{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:20px;
+}}
+.card {{
+    background:#111827;
+    border:1px solid #1f2937;
+    border-radius:18px;
+    padding:26px;
+    box-shadow:0 20px 60px rgba(0,0,0,.35);
+}}
+.label {{
+    color:#94a3b8;
+    font-size:14px;
+}}
+.value {{
+    font-size:30px;
+    font-weight:bold;
+    margin-top:10px;
+}}
+.api-key {{
+    background:#020617;
+    border:1px solid #1f2937;
+    padding:18px;
+    border-radius:12px;
+    word-break:break-all;
+    color:#22c55e;
+    margin-top:15px;
+}}
+.progress {{
+    height:14px;
+    background:#1e293b;
+    border-radius:999px;
+    overflow:hidden;
+    margin-top:18px;
+}}
+.bar {{
+    height:100%;
+    width:{usage_pct}%;
+    background:#22c55e;
+}}
+.actions {{
+    margin-top:35px;
+    display:flex;
+    gap:15px;
+}}
+.button {{
+    padding:14px 20px;
+    border-radius:10px;
+    background:#22c55e;
+    color:white;
+    font-weight:bold;
+}}
+.secondary {{
+    background:#1e293b;
+}}
+@media(max-width:800px) {{
+    .grid {{ grid-template-columns:1fr; }}
+    .header {{ flex-direction:column; align-items:flex-start; gap:15px; }}
+}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <div>
+        <h1>Dashboard</h1>
+        <p class="label">Welcome back, {row["email"]}</p>
+    </div>
+    <a href="/">← Home</a>
+</div>
+
+<div class="grid">
+    <div class="card">
+        <div class="label">Current Plan</div>
+        <div class="value">{row.get("plan", "developer").upper()}</div>
+        <p class="label">Status: {row.get("subscription_status", "free")}</p>
+    </div>
+
+    <div class="card">
+        <div class="label">Requests Today</div>
+        <div class="value">{requests_today:,} / {daily_limit:,}</div>
+        <div class="progress"><div class="bar"></div></div>
+        <p class="label">{usage_pct}% used</p>
+    </div>
+
+    <div class="card">
+        <div class="label">Daily Limit</div>
+        <div class="value">{daily_limit:,}</div>
+        <p class="label">Upgrade for higher limits</p>
+    </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+    <div class="label">Your API Key</div>
+    <div class="api-key">{row["api_key"]}</div>
+</div>
+
+<div class="actions">
+    <a class="button" href="/docs">View API Docs</a>
+    <a class="button secondary" href="/#pricing">Upgrade Plan</a>
+</div>
+
+</div>
+</body>
+</html>
+"""
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
