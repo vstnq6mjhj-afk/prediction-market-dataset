@@ -457,13 +457,13 @@ Authorization: Bearer YOUR_API_KEY
             <section class="pricing">
                 <div class="card">
                     <h3>Developer</h3>
-                    <div class="price">$19/mo</div>
+                    <div class="price">£19/mo</div>
                     <p>For testing, prototypes, and individual developers.</p>
                     <p>Monthly, 3-month, 6-month, and annual billing available.</p>
                 </div>
                 <div class="card">
                     <h3>Professional</h3>
-                    <div class="price">$49/mo</div>
+                    <div class="price">£49/mo</div>
                     <p>For production applications, research teams, and serious users.</p>
                     <p>Higher limits and priority feature access.</p>
                 </div>
