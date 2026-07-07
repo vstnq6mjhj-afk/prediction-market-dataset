@@ -464,15 +464,18 @@ def signup(email: str = Form(...), password: str = Form(...)):
     try:
         api_key = make_api_key()
 
-        supabase.auth.sign_up({
+        auth_result = supabase.auth.sign_up({
             "email": email,
             "password": password,
         })
+
+        user_id = auth_result.user.id
 
         existing = supabase.table("api_keys").select("*").eq("email", email).limit(1).execute()
 
         if existing.data:
             supabase.table("api_keys").update({
+                "user_id": user_id,
                 "api_key": api_key,
                 "plan": "developer",
                 "active": True,
@@ -482,6 +485,7 @@ def signup(email: str = Form(...), password: str = Form(...)):
             }).eq("email", email).execute()
         else:
             supabase.table("api_keys").insert({
+                "user_id": user_id,
                 "email": email,
                 "api_key": api_key,
                 "plan": "developer",
