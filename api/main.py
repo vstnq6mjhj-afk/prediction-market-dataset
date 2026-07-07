@@ -485,7 +485,6 @@ def signup(email: str = Form(...), password: str = Form(...)):
                 "email": email,
                 "api_key": api_key,
                 "plan": "developer",
-                "tier": "developer",
                 "active": True,
                 "daily_limit": 100,
                 "requests_today": 0,
