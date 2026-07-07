@@ -4,6 +4,9 @@ from typing import Optional
 import duckdb
 import math
 import pandas as pd
+import secrets
+from fastapi import Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses  import HTMLResponse
 
@@ -21,6 +24,8 @@ app = FastAPI(
     description="Cross-platform prediction market data API covering Polymarket, Kalshi, Manifold, and PredictIt. Includes market search, latest snapshots, historical market data, movers, categories, platforms, and dataset stats.",
 )
 
+def make_api_key():
+    return "pmd_live_" + secrets.token_urlsafe(32)
 
 def query_db(sql: str, params=None):
     conn = duckdb.connect(DB_PATH, read_only=True)
@@ -314,6 +319,59 @@ def stats(account=Depends(verify_api_key)):
 
     log_api_request(account["api_key"], "/v1/stats", 200, 1)
     return row
+
+@app.get("/signup", response_class=HTMLResponse, include_in_schema=False)
+def signup_page():
+    return """
+    <h1>Create account</h1>
+    <form method="post" action="/signup">
+      <input name="email" type="email" placeholder="Email" required><br><br>
+      <input name="password" type="password" placeholder="Password" required><br><br>
+      <button type="submit">Create account</button>
+    </form>
+    <p><a href="/login">Already have an account?</a></p>
+    """
+
+@app.post("/signup", include_in_schema=False)
+def signup(email: str = Form(...), password: str = Form(...)):
+    api_key = make_api_key()
+
+    supabase.auth.sign_up({
+        "email": email,
+        "password": password,
+    })
+
+    supabase.table("api_keys").insert({
+        "email": email,
+        "api_key": api_key,
+        "plan": "developer",
+        "active": True,
+        "daily_limit": 100,
+        "subscription_status": "free",
+    }).execute()
+
+    return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard(email: str):
+    result = supabase.table("api_keys").select("*").eq("email", email).limit(1).execute()
+    row = result.data[0] if result.data else None
+
+    if not row:
+        return "<h1>No API key found</h1>"
+
+    return f"""
+    <h1>Prediction Market Dataset Dashboard</h1>
+    <p><b>Email:</b> {row["email"]}</p>
+    <p><b>Plan:</b> {row["plan"]}</p>
+    <p><b>Status:</b> {row.get("subscription_status", "free")}</p>
+    <p><b>Requests Today:</b> {row.get("requests_today", 0)}</p>
+    <p><b>Daily Limit:</b> {row.get("daily_limit", 100)}</p>
+    <p><b>API Key:</b></p>
+    <code>{row["api_key"]}</code>
+    <p><a href="/docs">View API Docs</a></p>
+    """
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
