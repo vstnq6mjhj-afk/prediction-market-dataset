@@ -633,6 +633,25 @@ a {{
 </html>
 """
 
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+def login_page():
+    return """
+<!DOCTYPE html>
+<html>
+<body style="background:#0b1020;color:white;font-family:Arial;display:flex;justify-content:center;align-items:center;height:100vh;">
+<div style="background:#111827;padding:40px;border-radius:18px;width:420px;">
+<h1>Login</h1>
+<p style="color:#94a3b8;">Enter your email to open your dashboard.</p>
+<form method="get" action="/dashboard">
+<input name="email" type="email" placeholder="Email address" required style="width:100%;padding:14px;margin-top:16px;border-radius:10px;background:#1e293b;color:white;border:none;">
+<button style="width:100%;padding:14px;margin-top:22px;border:none;border-radius:10px;background:#22c55e;color:white;">Login</button>
+</form>
+<p><a href="/signup" style="color:#38bdf8;">Create account</a></p>
+</div>
+</body>
+</html>
+"""
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
     return """
