@@ -298,3 +298,17 @@ def categories(account=Depends(verify_api_key)):
 
     log_api_request(account["api_key"], "/v1/categories", 200, len(rows))
     return rows
+
+@app.get("/v1/stats")
+def stats(account=Depends(verify_api_key)):
+    row = query_db("""
+        SELECT
+            COUNT(*) AS snapshots,
+            COUNT(DISTINCT platform || ':' || market_id) AS markets,
+            COUNT(DISTINCT platform) AS platforms,
+            MAX(snapshot_time) AS latest_snapshot
+        FROM market_snapshots
+    """)[0]
+
+    log_api_request(account["api_key"], "/v1/stats", 200, 1)
+    return row
