@@ -461,23 +461,41 @@ Already have an account?
 
 @app.post("/signup", include_in_schema=False)
 def signup(email: str = Form(...), password: str = Form(...)):
-    api_key = make_api_key()
+    try:
+        api_key = make_api_key()
 
-    supabase.auth.sign_up({
-        "email": email,
-        "password": password,
-    })
+        supabase.auth.sign_up({
+            "email": email,
+            "password": password,
+        })
 
-    supabase.table("api_keys").insert({
-        "email": email,
-        "api_key": api_key,
-        "plan": "developer",
-        "active": True,
-        "daily_limit": 100,
-        "subscription_status": "free",
-    }).execute()
+        existing = supabase.table("api_keys").select("*").eq("email", email).limit(1).execute()
 
-    return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
+        if existing.data:
+            supabase.table("api_keys").update({
+                "api_key": api_key,
+                "plan": "developer",
+                "active": True,
+                "daily_limit": 100,
+                "requests_today": 0,
+                "subscription_status": "free",
+            }).eq("email", email).execute()
+        else:
+            supabase.table("api_keys").insert({
+                "email": email,
+                "api_key": api_key,
+                "plan": "developer",
+                "tier": "developer",
+                "active": True,
+                "daily_limit": 100,
+                "requests_today": 0,
+                "subscription_status": "free",
+            }).execute()
+
+        return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
+
+    except Exception as e:
+        return HTMLResponse(f"<h1>Signup failed</h1><pre>{str(e)}</pre>", status_code=500)
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
