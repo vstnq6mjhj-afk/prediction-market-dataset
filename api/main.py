@@ -312,3 +312,23 @@ def stats(account=Depends(verify_api_key)):
 
     log_api_request(account["api_key"], "/v1/stats", 200, 1)
     return row
+
+@app.get("/", include_in_schema=False)
+def root():
+    return {
+        "name": "Prediction Market Dataset API",
+        "status": "online",
+        "version": "v1",
+        "docs": "https://prediction-market-dataset-api.onrender.com/docs",
+        "endpoints": [
+            "/v1/health",
+            "/v1/stats",
+            "/v1/latest",
+            "/v1/search",
+            "/v1/market/{market_id}",
+            "/v1/platforms",
+            "/v1/movers",
+            "/v1/categories",
+            "/v1/account",
+        ],
+    }
