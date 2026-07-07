@@ -323,14 +323,141 @@ def stats(account=Depends(verify_api_key)):
 @app.get("/signup", response_class=HTMLResponse, include_in_schema=False)
 def signup_page():
     return """
-    <h1>Create account</h1>
-    <form method="post" action="/signup">
-      <input name="email" type="email" placeholder="Email" required><br><br>
-      <input name="password" type="password" placeholder="Password" required><br><br>
-      <button type="submit">Create account</button>
-    </form>
-    <p><a href="/login">Already have an account?</a></p>
-    """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Sign Up</title>
+
+<style>
+
+body{
+    margin:0;
+    background:#0b1020;
+    font-family:Arial,sans-serif;
+    color:white;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    height:100vh;
+}
+
+.card{
+
+    width:420px;
+    background:#111827;
+    padding:40px;
+    border-radius:18px;
+    border:1px solid #1f2937;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+
+}
+
+h1{
+
+    text-align:center;
+    margin-bottom:10px;
+
+}
+
+p{
+
+    color:#94a3b8;
+    text-align:center;
+
+}
+
+input{
+
+    width:100%;
+    padding:14px;
+    margin-top:16px;
+    border:none;
+    border-radius:10px;
+    background:#1e293b;
+    color:white;
+    font-size:16px;
+    box-sizing:border-box;
+
+}
+
+button{
+
+    width:100%;
+    padding:14px;
+    margin-top:22px;
+    border:none;
+    border-radius:10px;
+    background:#22c55e;
+    color:white;
+    font-size:16px;
+    cursor:pointer;
+
+}
+
+button:hover{
+
+    background:#16a34a;
+
+}
+
+a{
+
+    color:#38bdf8;
+    text-decoration:none;
+
+}
+
+.footer{
+
+    text-align:center;
+    margin-top:25px;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<h1>Create your account</h1>
+
+<p>Start using the Prediction Market Dataset API</p>
+
+<form method="post" action="/signup">
+
+<input
+type="email"
+name="email"
+placeholder="Email"
+required>
+
+<input
+type="password"
+name="password"
+placeholder="Password"
+required>
+
+<button>Create Account</button>
+
+</form>
+
+<div class="footer">
+
+Already have an account?
+
+<a href="/login">Login</a>
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+"""
 
 @app.post("/signup", include_in_schema=False)
 def signup(email: str = Form(...), password: str = Form(...)):

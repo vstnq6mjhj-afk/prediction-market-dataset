@@ -1,14 +1,21 @@
-import urllib.request
+import duckdb
 from pathlib import Path
 
-URL = "PASTE_SUPABASE_DOWNLOAD_URL_HERE"
-DEST = Path("/var/data/warehouse.duckdb")
+db = Path("/var/data/warehouse.duckdb")
 
-tmp = DEST.with_suffix(".tmp")
-urllib.request.urlretrieve(URL, tmp)
+print("Exists:", db.exists())
+print("Size:", db.stat().st_size)
 
-if tmp.stat().st_size < 200_000_000:
-    raise RuntimeError("Download too small, aborting")
+conn = duckdb.connect(str(db))
 
-tmp.replace(DEST)
-print("Restored", DEST, DEST.stat().st_size)
+print("Rows:", conn.execute(
+    "SELECT COUNT(*) FROM market_snapshots"
+).fetchone()[0])
+
+print("Markets:", conn.execute(
+    "SELECT COUNT(DISTINCT market_id) FROM market_snapshots"
+).fetchone()[0])
+
+print("Latest:", conn.execute(
+    "SELECT MAX(snapshot_time) FROM market_snapshots"
+).fetchone()[0])
