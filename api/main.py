@@ -8,13 +8,11 @@ import secrets
 from fastapi import Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses  import HTMLResponse
 
 from api.auth import verify_api_key
 from api.usage import log_api_request
 from api.supabase_client import supabase
 from api.keygen import generate_api_key
-from api.supabase_client import supabase
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
@@ -47,6 +45,74 @@ def query_db(sql: str, params=None):
         return records
     finally:
         conn.close()
+
+
+def ensure_api_key_for_user(email: str, user_id: str):
+    """Return an api_keys row for this user, creating it if missing."""
+    email = email.strip().lower()
+
+    existing = (
+        supabase.table("api_keys")
+        .select("*")
+        .eq("email", email)
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        row = existing.data[0]
+
+        updates = {}
+        if not row.get("user_id"):
+            updates["user_id"] = user_id
+        if not row.get("api_key"):
+            updates["api_key"] = make_api_key()
+        if not row.get("plan"):
+            updates["plan"] = "developer"
+        if row.get("daily_limit") is None:
+            updates["daily_limit"] = 100
+        if row.get("requests_today") is None:
+            updates["requests_today"] = 0
+        if not row.get("subscription_status"):
+            updates["subscription_status"] = "free"
+        if row.get("active") is None:
+            updates["active"] = True
+
+        if updates:
+            supabase.table("api_keys").update(updates).eq("email", email).execute()
+            refreshed = (
+                supabase.table("api_keys")
+                .select("*")
+                .eq("email", email)
+                .limit(1)
+                .execute()
+            )
+            return refreshed.data[0]
+
+        return row
+
+    api_key = make_api_key()
+    inserted = supabase.table("api_keys").insert({
+        "user_id": user_id,
+        "email": email,
+        "api_key": api_key,
+        "plan": "developer",
+        "active": True,
+        "daily_limit": 100,
+        "requests_today": 0,
+        "subscription_status": "free",
+    }).execute()
+
+    return inserted.data[0] if inserted.data else {
+        "user_id": user_id,
+        "email": email,
+        "api_key": api_key,
+        "plan": "developer",
+        "active": True,
+        "daily_limit": 100,
+        "requests_today": 0,
+        "subscription_status": "free",
+    }
 
 
 @app.get("/v1/health")
@@ -221,14 +287,11 @@ def movers(
     log_api_request(account["api_key"], "/v1/movers", 200, len(rows))
     return rows
 
-    log_api_request(account["api_key"], "/v1/movers", 200, len(rows))
-    return rows
-
 @app.get("/v1/account")
 def account(account=Depends(verify_api_key)):
     return {
         "email": account["email"],
-        "plan": account["tier"],
+        "plan": account.get("plan", account.get("tier", "developer")),
         "requests_today": account["requests_today"],
         "daily_limit": account["daily_limit"],
         "remaining": account["remaining"],
@@ -249,21 +312,6 @@ def regenerate_api_key(account=Depends(verify_api_key)):
         "api_key": new_key,
         "message": "API key regenerated successfully"
     }
-
-@app.get("/v1/market/{market_id}")
-def market_detail(
-    market_id: str,
-    account=Depends(verify_api_key),
-):
-    rows = query_db("""
-        SELECT *
-        FROM market_snapshots
-        WHERE market_id = ?
-        ORDER BY snapshot_time DESC
-    """, [market_id])
-
-    log_api_request(account["api_key"], "/v1/market", 200, len(rows))
-    return rows
 
 @app.get("/v1/search")
 def search(
@@ -462,43 +510,25 @@ Already have an account?
 @app.post("/signup", include_in_schema=False)
 def signup(email: str = Form(...), password: str = Form(...)):
     try:
-        api_key = make_api_key()
+        email = email.strip().lower()
 
         auth_result = supabase.auth.sign_up({
             "email": email,
             "password": password,
         })
 
-        user_id = auth_result.user.id
+        if not auth_result.user:
+            raise Exception("Supabase did not return a user for this signup.")
 
-        existing = supabase.table("api_keys").select("*").eq("email", email).limit(1).execute()
-
-        if existing.data:
-            supabase.table("api_keys").update({
-                "user_id": user_id,
-                "api_key": api_key,
-                "plan": "developer",
-                "active": True,
-                "daily_limit": 100,
-                "requests_today": 0,
-                "subscription_status": "free",
-            }).eq("email", email).execute()
-        else:
-            supabase.table("api_keys").insert({
-                "user_id": user_id,
-                "email": email,
-                "api_key": api_key,
-                "plan": "developer",
-                "active": True,
-                "daily_limit": 100,
-                "requests_today": 0,
-                "subscription_status": "free",
-            }).execute()
+        ensure_api_key_for_user(email=email, user_id=auth_result.user.id)
 
         return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
 
     except Exception as e:
-        return HTMLResponse(f"<h1>Signup failed</h1><pre>{str(e)}</pre>", status_code=500)
+        return HTMLResponse(
+            f"<h1>Signup failed</h1><pre>{str(e)}</pre><p><a href='/signup'>Try again</a></p>",
+            status_code=500,
+        )
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 def login_page():
@@ -538,20 +568,27 @@ def login_page():
 @app.post("/login", include_in_schema=False)
 def login(email: str = Form(...), password: str = Form(...)):
     try:
+        email = email.strip().lower()
+
         result = supabase.auth.sign_in_with_password({
             "email": email,
-            "password": password
+            "password": password,
         })
+
+        if not result.user:
+            raise Exception("Login failed: no user returned by Supabase.")
+
+        ensure_api_key_for_user(email=result.user.email, user_id=result.user.id)
 
         return RedirectResponse(
             url=f"/dashboard?email={result.user.email}",
-            status_code=303
+            status_code=303,
         )
 
     except Exception as e:
         return HTMLResponse(
-            f"<h2>Login failed</h2><pre>{e}</pre>",
-            status_code=401
+            f"<h2>Login failed</h2><pre>{e}</pre><p><a href='/login'>Try again</a></p>",
+            status_code=401,
         )
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
@@ -560,7 +597,11 @@ def dashboard(email: str):
     row = result.data[0] if result.data else None
 
     if not row:
-        return "<h1>No API key found</h1>"
+        return """
+        <h1>No API key found</h1>
+        <p>This account exists in Auth but has no api_keys row yet.</p>
+        <p>Please log out and log in again from <a href="/login">/login</a>. The login route will create the missing API key automatically.</p>
+        """
 
     requests_today = row.get("requests_today", 0) or 0
     daily_limit = row.get("daily_limit", 100) or 100
