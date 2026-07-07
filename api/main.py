@@ -17,6 +17,7 @@ DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 app = FastAPI(
     title="Prediction Market Dataset API",
     version="1.0.0",
+    description="Cross-platform prediction market data API covering Polymarket, Kalshi, Manifold, and PredictIt. Includes market search, latest snapshots, historical market data, movers, categories, platforms, and dataset stats.",
 )
 
 
