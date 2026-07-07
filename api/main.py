@@ -500,6 +500,59 @@ def signup(email: str = Form(...), password: str = Form(...)):
     except Exception as e:
         return HTMLResponse(f"<h1>Signup failed</h1><pre>{str(e)}</pre>", status_code=500)
 
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+def login_page():
+    return """
+    <html>
+    <body style="font-family:Arial;background:#0b1020;color:white;display:flex;justify-content:center;align-items:center;height:100vh;">
+        <form method="post" action="/login" style="background:#111827;padding:40px;border-radius:12px;width:400px;">
+            <h1>Login</h1>
+
+            <input
+                name="email"
+                type="email"
+                placeholder="Email"
+                required
+                style="width:100%;padding:12px;margin:10px 0;"
+            >
+
+            <input
+                name="password"
+                type="password"
+                placeholder="Password"
+                required
+                style="width:100%;padding:12px;margin:10px 0;"
+            >
+
+            <button
+                type="submit"
+                style="width:100%;padding:12px;background:#22c55e;color:white;border:none;border-radius:8px;">
+                Login
+            </button>
+        </form>
+    </body>
+    </html>
+    """
+
+
+@app.post("/login", include_in_schema=False)
+def login(email: str = Form(...), password: str = Form(...)):
+    try:
+        result = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+
+        return RedirectResponse(
+            url=f"/dashboard?email={result.user.email}",
+            status_code=303
+        )
+
+    except Exception as e:
+        return HTMLResponse(
+            f"<h2>Login failed</h2><pre>{e}</pre>",
+            status_code=401
+        )
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 def dashboard(email: str):
