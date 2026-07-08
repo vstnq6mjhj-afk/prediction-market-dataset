@@ -30,6 +30,7 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "https://prediction-market-dataset-api.
 DATASET_EXPLORER_URL = os.getenv("DATASET_EXPLORER_URL", "https://prediction-market-dataset.onrender.com")
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 stripe.api_key = STRIPE_SECRET_KEY
 
 # The checkout code below uses inline Stripe price_data so a bad/stale price_... ID cannot break checkout.
@@ -236,6 +237,61 @@ def get_api_key_row_by_email(email: str):
 
 
 
+
+
+def plan_daily_limit(plan: str) -> int:
+    plan = str(plan or "").lower()
+    if plan in PLAN_CONFIG:
+        return int(PLAN_CONFIG[plan]["daily_limit"])
+    return 100
+
+
+def update_subscription_by_email(
+    email: str,
+    plan: str,
+    subscription_status: str,
+    stripe_customer_id: Optional[str] = None,
+):
+    email = normalize_email(email)
+    plan = str(plan or "free").lower()
+    subscription_status = str(subscription_status or "free").lower()
+
+    if not email:
+        return
+
+    if subscription_status in {"active", "trialing"}:
+        daily_limit = plan_daily_limit(plan)
+        stored_status = "active"
+    else:
+        daily_limit = 100
+        stored_status = subscription_status
+        if plan not in PLAN_CONFIG:
+            plan = "free"
+
+    updates = {
+        "plan": plan,
+        "subscription_status": stored_status,
+        "daily_limit": daily_limit,
+    }
+
+    if stripe_customer_id:
+        updates["stripe_customer_id"] = stripe_customer_id
+
+    supabase.table("api_keys").update(updates).eq("email", email).execute()
+
+
+def update_subscription_by_customer(stripe_customer_id: str, subscription_status: str):
+    stripe_customer_id = str(stripe_customer_id or "").strip()
+    if not stripe_customer_id:
+        return
+
+    status = str(subscription_status or "free").lower()
+    updates = {"subscription_status": status}
+
+    if status != "active":
+        updates["daily_limit"] = 100
+
+    supabase.table("api_keys").update(updates).eq("stripe_customer_id", stripe_customer_id).execute()
 
 def require_active_subscription(account=Depends(verify_api_key)):
     """Allow /v1/account for all valid keys, but require paid subscription for dataset endpoints."""
@@ -641,6 +697,7 @@ def dashboard(request: Request):
     <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
     <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
     <a class="button secondary" href="/pricing">View Plans & Billing</a>
+    <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
 </div>
 <script>
 function copyApiKey() {{
@@ -661,6 +718,45 @@ def dashboard_regenerate_api_key(request: Request):
     supabase.table("api_keys").update({"api_key": make_api_key()}).eq("email", email).execute()
     return RedirectResponse(url="/dashboard", status_code=303)
 
+
+
+@app.post("/billing/portal", include_in_schema=False)
+def create_billing_portal(request: Request):
+    email = require_portal_user(request)
+    if not email:
+        return RedirectResponse(url="/login", status_code=303)
+
+    row = get_api_key_row_by_email(email)
+    if not row:
+        return RedirectResponse(url="/pricing", status_code=303)
+
+    stripe_customer_id = row.get("stripe_customer_id")
+    if not stripe_customer_id:
+        return RedirectResponse(url="/pricing", status_code=303)
+
+    if not STRIPE_SECRET_KEY:
+        return HTMLResponse(
+            page_shell(
+                "Stripe not configured",
+                "<h1>Stripe secret key is not configured</h1><p>Add STRIPE_SECRET_KEY to Render.</p>",
+            ),
+            status_code=500,
+        )
+
+    try:
+        portal_session = stripe.billing_portal.Session.create(
+            customer=stripe_customer_id,
+            return_url=f"{APP_BASE_URL}/dashboard",
+        )
+        return RedirectResponse(portal_session.url, status_code=303)
+    except Exception as e:
+        return HTMLResponse(
+            page_shell(
+                "Billing portal failed",
+                f"<h1>Billing portal failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back to dashboard</a></p>",
+            ),
+            status_code=500,
+        )
 
 @app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
 def pricing_page(request: Request):
@@ -802,10 +898,75 @@ def billing_success(request: Request, plan: str):
     if plan not in PLAN_CONFIG:
         plan = "developer"
 
-    supabase.table("api_keys").update({
-        "plan": plan,
-        "subscription_status": "active",
-        "daily_limit": PLAN_CONFIG[plan]["daily_limit"],
-    }).eq("email", email).execute()
+    # The webhook is the source of truth, but this keeps the dashboard responsive
+    # immediately after checkout returns.
+    update_subscription_by_email(
+        email=email,
+        plan=plan,
+        subscription_status="active",
+    )
 
     return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/stripe/webhook", include_in_schema=False)
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Stripe webhook secret is not configured")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Stripe payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid Stripe signature")
+
+    event_type = event.get("type")
+    data_object = event.get("data", {}).get("object", {})
+
+    if event_type == "checkout.session.completed":
+        metadata = data_object.get("metadata") or {}
+        email = (
+            metadata.get("email")
+            or data_object.get("customer_email")
+            or (data_object.get("customer_details") or {}).get("email")
+        )
+        plan = metadata.get("plan", "developer")
+        stripe_customer_id = data_object.get("customer")
+
+        update_subscription_by_email(
+            email=email,
+            plan=plan,
+            subscription_status="active",
+            stripe_customer_id=stripe_customer_id,
+        )
+
+    elif event_type == "customer.subscription.updated":
+        metadata = data_object.get("metadata") or {}
+        email = metadata.get("email")
+        plan = metadata.get("plan", "developer")
+        status = data_object.get("status", "active")
+        stripe_customer_id = data_object.get("customer")
+
+        if status in {"active", "trialing"} and email:
+            update_subscription_by_email(
+                email=email,
+                plan=plan,
+                subscription_status="active",
+                stripe_customer_id=stripe_customer_id,
+            )
+        elif status in {"past_due", "unpaid"}:
+            update_subscription_by_customer(stripe_customer_id, "past_due")
+        elif status in {"canceled", "incomplete_expired"}:
+            update_subscription_by_customer(stripe_customer_id, "canceled")
+
+    elif event_type == "customer.subscription.deleted":
+        update_subscription_by_customer(data_object.get("customer"), "canceled")
+
+    elif event_type == "invoice.payment_failed":
+        update_subscription_by_customer(data_object.get("customer"), "past_due")
+
+    return {"received": True}
