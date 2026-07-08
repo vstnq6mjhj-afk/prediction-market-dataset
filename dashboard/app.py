@@ -399,11 +399,23 @@ try:
 
     elif page == "Market Matcher":
         st.subheader("Market Matcher")
-        st.caption("Match similar live prediction markets across platforms using title similarity and latest YES prices.")
+        st.caption(
+            "Find likely equivalent live prediction markets across platforms using token overlap, title similarity, and latest YES prices."
+        )
 
-        min_match_score = st.slider("Minimum title similarity", 0.70, 1.00, 0.88, 0.01)
-        min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.02, 0.01)
-        max_per_platform = st.slider("Markets per platform", 50, 250, 125, 25)
+        st.info(
+            "Tip: the matcher is intentionally broad. Use the filters below to tighten results after matches appear."
+        )
+
+        min_match_score = st.slider("Minimum match score", 0.20, 1.00, 0.35, 0.05)
+        min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
+        max_per_platform = st.slider("Markets per platform", 100, 500, 300, 50)
+        keyword_focus = st.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup...")
+
+        matcher_filter = latest_filter
+        if keyword_focus:
+            safe_keyword = safe_sql_text(keyword_focus.lower())
+            matcher_filter += f" AND LOWER(title) LIKE '%{safe_keyword}%'"
 
         latest = sql_df(
             conn,
@@ -425,12 +437,13 @@ try:
                     raw_url,
                     ROW_NUMBER() OVER (
                         PARTITION BY platform
-                        ORDER BY volume DESC NULLS LAST
+                        ORDER BY COALESCE(volume, 0) DESC, COALESCE(liquidity, 0) DESC
                     ) AS rn
                 FROM latest
                 WHERE title IS NOT NULL
                   AND yes_price IS NOT NULL
-                  {latest_filter}
+                  AND LOWER(platform) <> 'kalshi'
+                  {matcher_filter}
             )
             SELECT *
             FROM ranked
@@ -442,17 +455,52 @@ try:
         if latest.empty or latest["platform"].nunique() < 2:
             st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
         else:
+            platform_counts = latest.groupby("platform").size().reset_index(name="markets_loaded")
+            st.caption("Markets loaded into matcher")
+            show_df(platform_counts)
+
+            def token_set(title: Any) -> set:
+                norm = normalize_title(title)
+                return {w for w in norm.split() if len(w) >= 3}
+
+            def jaccard(a: set, b: set) -> float:
+                if not a or not b:
+                    return 0.0
+                return len(a & b) / len(a | b)
+
             rows = latest.to_dict("records")
+            prepared = []
+            for row in rows:
+                tokens = token_set(row.get("title"))
+                prepared.append({**row, "tokens": tokens})
+
             matches = []
-            for i, a in enumerate(rows):
-                for b in rows[i + 1:]:
+            for i, a in enumerate(prepared):
+                for b in prepared[i + 1:]:
                     if str(a.get("platform")).lower() == str(b.get("platform")).lower():
                         continue
 
                     title_a = a.get("title")
                     title_b = b.get("title")
-                    score = similarity(title_a, title_b)
-                    if score < min_match_score:
+                    tokens_a = a.get("tokens", set())
+                    tokens_b = b.get("tokens", set())
+
+                    title_score = similarity(title_a, title_b)
+                    token_score = jaccard(tokens_a, tokens_b)
+                    overlap_terms = sorted(tokens_a & tokens_b)
+
+                    # Weighted score. Token overlap matters more than raw full-title similarity
+                    # because different platforms often phrase equivalent markets differently.
+                    match_score = (0.60 * token_score) + (0.40 * title_score)
+
+                    # Give a small boost when there are meaningful overlapping terms.
+                    if len(overlap_terms) >= 2:
+                        match_score += 0.10
+                    if len(overlap_terms) >= 3:
+                        match_score += 0.10
+                    match_score = min(match_score, 1.0)
+
+                    if match_score < min_match_score:
                         continue
 
                     try:
@@ -473,7 +521,10 @@ try:
                         "title_b": title_b,
                         "price_b": price_b,
                         "price_difference": spread,
-                        "match_score": score,
+                        "match_score": match_score,
+                        "title_similarity": title_score,
+                        "token_overlap": token_score,
+                        "shared_terms": ", ".join(overlap_terms[:12]),
                         "volume_a": a.get("volume"),
                         "volume_b": b.get("volume"),
                         "liquidity_a": a.get("liquidity"),
@@ -486,18 +537,66 @@ try:
 
             matches_df = pd.DataFrame(matches)
             if matches_df.empty:
-                st.info("No matches found with the current filters.")
+                st.info(
+                    "No matches found. Try lowering Minimum match score to 0.20, setting price difference to 0.00, or entering a keyword like bitcoin/trump/fed."
+                )
             else:
-                matches_df = matches_df.sort_values(["price_difference", "match_score"], ascending=False).head(100)
+                matches_df = matches_df.sort_values(
+                    ["match_score", "price_difference"], ascending=False
+                ).head(150)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Potential Matches", f"{len(matches_df):,}")
+                c2.metric("Largest Difference", f"{matches_df['price_difference'].max() * 100:.2f}%")
+                c3.metric("Avg Match Score", f"{matches_df['match_score'].mean() * 100:.0f}%")
+
                 display = matches_df.copy()
                 display["price_a"] = display["price_a"].map(lambda x: f"{x:.2%}")
                 display["price_b"] = display["price_b"].map(lambda x: f"{x:.2%}")
                 display["price_difference"] = display["price_difference"].map(lambda x: f"{x:.2%}")
                 display["match_score"] = display["match_score"].map(lambda x: f"{x:.0%}")
-                show_df(display)
+                display["title_similarity"] = display["title_similarity"].map(lambda x: f"{x:.0%}")
+                display["token_overlap"] = display["token_overlap"].map(lambda x: f"{x:.0%}")
+
+                display = display.rename(columns={
+                    "platform_a": "Platform A",
+                    "title_a": "Market A",
+                    "price_a": "YES A",
+                    "platform_b": "Platform B",
+                    "title_b": "Market B",
+                    "price_b": "YES B",
+                    "price_difference": "Difference",
+                    "match_score": "Match Score",
+                    "title_similarity": "Title Similarity",
+                    "token_overlap": "Token Overlap",
+                    "shared_terms": "Shared Terms",
+                    "url_a": "URL A",
+                    "url_b": "URL B",
+                })
+
+                show_df(display[
+                    [
+                        "Platform A", "Market A", "YES A",
+                        "Platform B", "Market B", "YES B",
+                        "Difference", "Match Score", "Shared Terms",
+                        "Title Similarity", "Token Overlap",
+                        "URL A", "URL B",
+                    ]
+                ])
+
+                st.download_button(
+                    "Download matcher results CSV",
+                    matches_df.to_csv(index=False),
+                    file_name="prediction_market_matcher_results.csv",
+                    mime="text/csv",
+                )
 
                 chart_df = matches_df.head(25).copy()
-                chart_df["match_label"] = chart_df["platform_a"].astype(str) + " ↔ " + chart_df["platform_b"].astype(str)
+                chart_df["match_label"] = (
+                    chart_df["platform_a"].astype(str)
+                    + " ↔ "
+                    + chart_df["platform_b"].astype(str)
+                )
                 chart_df["price_difference_pct"] = chart_df["price_difference"] * 100
                 fig = px.bar(
                     chart_df,
