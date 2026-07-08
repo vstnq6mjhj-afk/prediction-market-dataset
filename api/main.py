@@ -5,6 +5,7 @@ import duckdb
 import math
 import pandas as pd
 import secrets
+import stripe
 from fastapi import Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -15,6 +16,13 @@ from api.supabase_client import supabase
 from api.keygen import generate_api_key
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_DEVELOPER_PRICE_ID = os.getenv("STRIPE_DEVELOPER_PRICE_ID")
+STRIPE_PROFESSIONAL_PRICE_ID = os.getenv("STRIPE_PROFESSIONAL_PRICE_ID")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://prediction-market-dataset-api.onrender.com")
+
+stripe.api_key = STRIPE_SECRET_KEY
 
 app = FastAPI(
     title="Prediction Market Dataset API",
@@ -756,9 +764,19 @@ a {{
         </button>
     </form>
 
-    <a class="button secondary" href="/#pricing">
-        Upgrade Plan
-    </a>
+    <form method="post" action="/billing/checkout/developer" style="margin:0;">
+    <input type="hidden" name="email" value="{row["email"]}">
+    <button class="button secondary" type="submit">
+        Upgrade to Developer
+    </button>
+</form>
+
+<form method="post" action="/billing/checkout/professional" style="margin:0;">
+    <input type="hidden" name="email" value="{row["email"]}">
+    <button class="button secondary" type="submit">
+        Upgrade to Professional
+    </button>
+</form>
 </div>
 
 <script>
