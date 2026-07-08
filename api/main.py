@@ -740,7 +740,14 @@ a {{
 
 <div class="actions">
     <a class="button" href="/docs">View API Docs</a>
-    <a class="button secondary" href="/#pricing">Upgrade Plan</a>
+
+    <a class="button secondary" href="https://prediction-market-dataset.onrender.com" target="_blank">
+        Open Dataset Explorer
+    </a>
+
+    <a class="button secondary" href="/#pricing">
+        Upgrade Plan
+    </a>
 </div>
 
 </div>
