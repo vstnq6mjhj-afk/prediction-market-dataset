@@ -64,6 +64,10 @@ def safe_sql_text(value: str) -> str:
     return str(value or "").replace("'", "''")
 
 
+def safe_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def normalize_title(title: Any) -> str:
     text = str(title or "").lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
