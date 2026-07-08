@@ -721,40 +721,63 @@ def dashboard_regenerate_api_key(request: Request):
 
 
 @app.post("/billing/portal", include_in_schema=False)
-def create_billing_portal(request: Request):
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
+def create_billing_portal(email: str = Form(...)):
+    email = str(email or "").strip().lower()
 
-    row = get_api_key_row_by_email(email)
+    result = (
+        supabase.table("api_keys")
+        .select("*")
+        .eq("email", email)
+        .limit(1)
+        .execute()
+    )
+
+    row = result.data[0] if result.data else None
+
     if not row:
-        return RedirectResponse(url="/pricing", status_code=303)
+        return HTMLResponse(
+            "<h1>Account not found</h1><p>Please log in again.</p>",
+            status_code=404,
+        )
 
     stripe_customer_id = row.get("stripe_customer_id")
-    if not stripe_customer_id:
-        return RedirectResponse(url="/pricing", status_code=303)
 
-    if not STRIPE_SECRET_KEY:
-        return HTMLResponse(
-            page_shell(
-                "Stripe not configured",
-                "<h1>Stripe secret key is not configured</h1><p>Add STRIPE_SECRET_KEY to Render.</p>",
-            ),
-            status_code=500,
+    # If Supabase does not have the customer ID yet, try to find it in Stripe by email.
+    if not stripe_customer_id:
+        try:
+            customers = stripe.Customer.list(email=email, limit=1)
+
+            if customers.data:
+                stripe_customer_id = customers.data[0].id
+
+                supabase.table("api_keys").update({
+                    "stripe_customer_id": stripe_customer_id
+                }).eq("email", email).execute()
+
+        except Exception as e:
+            return HTMLResponse(
+                f"<h1>Could not find Stripe customer</h1><pre>{str(e)}</pre>",
+                status_code=500,
+            )
+
+    # If there is still no Stripe customer, this user has not paid yet.
+    if not stripe_customer_id:
+        return RedirectResponse(
+            url=f"/pricing?email={email}",
+            status_code=303,
         )
 
     try:
         portal_session = stripe.billing_portal.Session.create(
             customer=stripe_customer_id,
-            return_url=f"{APP_BASE_URL}/dashboard",
+            return_url=f"{APP_BASE_URL}/dashboard?email={email}",
         )
+
         return RedirectResponse(portal_session.url, status_code=303)
+
     except Exception as e:
         return HTMLResponse(
-            page_shell(
-                "Billing portal failed",
-                f"<h1>Billing portal failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back to dashboard</a></p>",
-            ),
+            f"<h1>Billing portal failed</h1><pre>{str(e)}</pre>",
             status_code=500,
         )
 
