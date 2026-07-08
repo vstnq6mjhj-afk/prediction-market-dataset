@@ -1,9 +1,12 @@
 import os
-from typing import Iterable, Optional
+import re
+from difflib import SequenceMatcher
+from typing import Any, Dict, Iterable, Optional
 
 import duckdb
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
@@ -32,6 +35,13 @@ st_autorefresh(interval=60 * 1000, limit=None, key="live_dashboard_refresh")
 # =========================
 
 
+def get_query_param(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = st.query_params.get(name, default)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return value
+
+
 def open_db() -> duckdb.DuckDBPyConnection:
     return duckdb.connect(DB_PATH, read_only=True)
 
@@ -39,7 +49,7 @@ def open_db() -> duckdb.DuckDBPyConnection:
 def sql_df(
     conn: duckdb.DuckDBPyConnection,
     query: str,
-    params: Optional[Iterable] = None,
+    params: Optional[Iterable[Any]] = None,
 ) -> pd.DataFrame:
     if params is None:
         return conn.execute(query).df()
@@ -54,9 +64,58 @@ def safe_sql_text(value: str) -> str:
     return str(value or "").replace("'", "''")
 
 
+def normalize_title(title: Any) -> str:
+    text = str(title or "").lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    stopwords = {
+        "will", "yes", "no", "the", "a", "an", "in", "on", "for", "of", "to",
+        "with", "and", "or", "who", "what", "when", "win", "wins", "winner",
+        "market", "markets", "prediction", "predict", "contract", "event", "by",
+        "2024", "2025", "2026", "2027", "2028", "2029", "2030",
+    }
+    words = [w for w in text.split() if w not in stopwords and len(w) > 2]
+    return " ".join(words[:12])
+
+
+def similarity(a: Any, b: Any) -> float:
+    return SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
+
+
+def validate_api_key(api_key: str) -> Optional[Dict[str, Any]]:
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        return None
+
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/v1/account",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except Exception:
+        return None
+
+
 # =========================
-# Header / Sidebar
+# Account / access gate
 # =========================
+
+query_api_key = get_query_param("api_key")
+if query_api_key:
+    st.session_state["pmd_api_key"] = query_api_key
+
+stored_api_key = st.session_state.get("pmd_api_key", "")
+account_status = validate_api_key(stored_api_key) if stored_api_key else None
+
+is_active_subscription = bool(
+    account_status
+    and str(account_status.get("subscription_status", "free")).lower() == "active"
+)
+current_plan = str(account_status.get("plan", "free")).lower() if account_status else "free"
+is_professional = is_active_subscription and current_plan == "professional"
 
 st.title("Prediction Market Dataset Explorer")
 st.caption("Live cross-platform prediction market data warehouse")
@@ -64,8 +123,31 @@ st.caption("Live cross-platform prediction market data warehouse")
 with st.sidebar:
     st.subheader("Account")
     st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
+    st.link_button("Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
     st.link_button("API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
+
     st.caption("Signup, login, subscriptions, billing, API keys, and usage are managed in the main customer portal.")
+
+    if account_status:
+        st.success(account_status.get("email", "Account connected"))
+        st.write(f"Plan: **{current_plan.upper()}**")
+        st.write(f"Status: **{account_status.get('subscription_status', 'free')}**")
+    else:
+        st.warning("No valid API key connected.")
+
+    entered_key = st.text_input(
+        "API key",
+        value=stored_api_key,
+        type="password",
+        help="Open this from the customer dashboard or paste your API key here.",
+    )
+    if entered_key and entered_key != stored_api_key:
+        st.session_state["pmd_api_key"] = entered_key.strip()
+        st.rerun()
+
+    if st.button("Clear API key"):
+        st.session_state.pop("pmd_api_key", None)
+        st.rerun()
 
     st.divider()
     page = st.radio(
@@ -75,21 +157,46 @@ with st.sidebar:
             "Markets",
             "Platforms",
             "Movers",
+            "Market Matcher",
             "Market Detail",
             "Health",
             "API",
         ],
     )
 
+if not is_active_subscription:
+    st.warning("A paid subscription is required to access the Dataset Explorer.")
+    st.write(
+        "Use the main customer portal to choose a plan, then open the Dataset Explorer from your customer dashboard."
+    )
+    st.link_button("Go to Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
+    st.stop()
+
+if page == "Market Matcher" and not is_professional:
+    st.warning("Market Matcher is included in the Professional plan.")
+    st.write("Developer subscribers still have access to the core dataset explorer, API docs, market search, movers, and market detail pages.")
+    st.link_button("Upgrade to Professional", f"{ACCOUNT_PORTAL_URL}/pricing")
+    st.stop()
+
+# =========================
+# Dataset filters
+# =========================
+
 conn = open_db()
 
 try:
+    platform_filter_sql = ""
+    if page == "Market Detail":
+        # Kalshi currently appears in the dataset but does not have useful Market Detail history.
+        platform_filter_sql = "AND LOWER(platform) <> 'kalshi'"
+
     platforms_df = sql_df(
         conn,
-        """
+        f"""
         SELECT DISTINCT platform
         FROM market_snapshots
         WHERE platform IS NOT NULL
+        {platform_filter_sql}
         ORDER BY platform
         """,
     )
@@ -129,7 +236,6 @@ try:
 
         st.divider()
         st.subheader("Platform Coverage")
-
         platform_stats = sql_df(
             conn,
             f"""
@@ -152,7 +258,6 @@ try:
         if not platform_stats.empty:
             fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
             st.plotly_chart(fig_rows, use_container_width=True)
-
             fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
             st.plotly_chart(fig_unique, use_container_width=True)
 
@@ -203,7 +308,6 @@ try:
             """,
         )
         show_df(top_volume)
-
         st.download_button(
             "Download latest markets CSV",
             top_volume.to_csv(index=False),
@@ -231,7 +335,6 @@ try:
             """,
         )
         show_df(platform_stats)
-
         if not platform_stats.empty:
             fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
             st.plotly_chart(fig_rows, use_container_width=True)
@@ -241,7 +344,6 @@ try:
     elif page == "Movers":
         st.subheader("Market Movers")
         st.caption("Largest moves from the most recent 2 days of snapshots.")
-
         movers = sql_df(
             conn,
             f"""
@@ -278,21 +380,10 @@ try:
             LIMIT 100
             """,
         )
-
         display_cols = [
-            "platform",
-            "market_id",
-            "title",
-            "snapshots",
-            "low_price",
-            "high_price",
-            "first_price",
-            "last_price",
-            "price_change",
-            "volume_change",
-            "liquidity_change",
+            "platform", "market_id", "title", "snapshots", "low_price", "high_price",
+            "first_price", "last_price", "price_change", "volume_change", "liquidity_change",
         ]
-
         if movers.empty:
             st.info("No movers found yet. Let the scheduler collect more snapshots.")
         else:
@@ -306,10 +397,122 @@ try:
             st.subheader("Liquidity Movers")
             show_df(movers.sort_values("liquidity_change", ascending=False).head(25)[display_cols])
 
+    elif page == "Market Matcher":
+        st.subheader("Market Matcher")
+        st.caption("Match similar live prediction markets across platforms using title similarity and latest YES prices.")
+
+        min_match_score = st.slider("Minimum title similarity", 0.70, 1.00, 0.88, 0.01)
+        min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.02, 0.01)
+        max_per_platform = st.slider("Markets per platform", 50, 250, 125, 25)
+
+        latest = sql_df(
+            conn,
+            f"""
+            WITH latest AS (
+                SELECT *
+                FROM market_snapshots
+                WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM market_snapshots)
+            ),
+            ranked AS (
+                SELECT
+                    platform,
+                    market_id,
+                    title,
+                    yes_price,
+                    no_price,
+                    volume,
+                    liquidity,
+                    raw_url,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY platform
+                        ORDER BY volume DESC NULLS LAST
+                    ) AS rn
+                FROM latest
+                WHERE title IS NOT NULL
+                  AND yes_price IS NOT NULL
+                  {latest_filter}
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn <= ?
+            """,
+            [max_per_platform],
+        )
+
+        if latest.empty or latest["platform"].nunique() < 2:
+            st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
+        else:
+            rows = latest.to_dict("records")
+            matches = []
+            for i, a in enumerate(rows):
+                for b in rows[i + 1:]:
+                    if str(a.get("platform")).lower() == str(b.get("platform")).lower():
+                        continue
+
+                    title_a = a.get("title")
+                    title_b = b.get("title")
+                    score = similarity(title_a, title_b)
+                    if score < min_match_score:
+                        continue
+
+                    try:
+                        price_a = float(a.get("yes_price"))
+                        price_b = float(b.get("yes_price"))
+                    except Exception:
+                        continue
+
+                    spread = abs(price_a - price_b)
+                    if spread < min_spread:
+                        continue
+
+                    matches.append({
+                        "platform_a": a.get("platform"),
+                        "title_a": title_a,
+                        "price_a": price_a,
+                        "platform_b": b.get("platform"),
+                        "title_b": title_b,
+                        "price_b": price_b,
+                        "price_difference": spread,
+                        "match_score": score,
+                        "volume_a": a.get("volume"),
+                        "volume_b": b.get("volume"),
+                        "liquidity_a": a.get("liquidity"),
+                        "liquidity_b": b.get("liquidity"),
+                        "market_id_a": a.get("market_id"),
+                        "market_id_b": b.get("market_id"),
+                        "url_a": a.get("raw_url"),
+                        "url_b": b.get("raw_url"),
+                    })
+
+            matches_df = pd.DataFrame(matches)
+            if matches_df.empty:
+                st.info("No matches found with the current filters.")
+            else:
+                matches_df = matches_df.sort_values(["price_difference", "match_score"], ascending=False).head(100)
+                display = matches_df.copy()
+                display["price_a"] = display["price_a"].map(lambda x: f"{x:.2%}")
+                display["price_b"] = display["price_b"].map(lambda x: f"{x:.2%}")
+                display["price_difference"] = display["price_difference"].map(lambda x: f"{x:.2%}")
+                display["match_score"] = display["match_score"].map(lambda x: f"{x:.0%}")
+                show_df(display)
+
+                chart_df = matches_df.head(25).copy()
+                chart_df["match_label"] = chart_df["platform_a"].astype(str) + " ↔ " + chart_df["platform_b"].astype(str)
+                chart_df["price_difference_pct"] = chart_df["price_difference"] * 100
+                fig = px.bar(
+                    chart_df,
+                    x="price_difference_pct",
+                    y="match_label",
+                    orientation="h",
+                    title="Largest Matched Market Price Differences",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
     elif page == "Market Detail":
         st.subheader("Market Detail")
-        st.caption("Select a market from the latest snapshot, then view up to 1,000 historical observations.")
+        st.caption("Kalshi is excluded from this selector until useful historical detail data is available.")
 
+        market_detail_filter = latest_filter + " AND LOWER(platform) <> 'kalshi'"
         markets = sql_df(
             conn,
             f"""
@@ -325,7 +528,7 @@ try:
                 MAX(snapshot_time) AS latest_snapshot
             FROM latest
             WHERE market_id IS NOT NULL
-            {latest_filter}
+            {market_detail_filter}
             GROUP BY platform, market_id
             ORDER BY latest_snapshot DESC
             LIMIT 1000
@@ -342,7 +545,6 @@ try:
                 + " | "
                 + markets["market_id"].fillna("").astype(str)
             )
-
             selected_label = st.selectbox("Select a market", markets["label"].tolist())
             selected_row = markets.loc[markets["label"] == selected_label].iloc[0]
             selected_platform_detail = selected_row["platform"]
@@ -451,26 +653,24 @@ try:
         st.divider()
         st.subheader("Example Request")
         st.code(
-            f"""curl -H "Authorization: Bearer YOUR_API_KEY" \\
-  "{API_BASE_URL}/v1/search?q=bitcoin""",
+            f'''curl -H "Authorization: Bearer YOUR_API_KEY" \\
+  "{API_BASE_URL}/v1/search?q=bitcoin"''',
             language="bash",
         )
 
         st.subheader("Core Endpoints")
-        endpoints = pd.DataFrame(
-            [
-                {"Endpoint": "/v1/health", "Description": "Dataset health and latest snapshot metadata"},
-                {"Endpoint": "/v1/stats", "Description": "Snapshot, market, and platform counts"},
-                {"Endpoint": "/v1/latest", "Description": "Latest market rows"},
-                {"Endpoint": "/v1/search?q=bitcoin", "Description": "Search latest markets by keyword"},
-                {"Endpoint": "/v1/markets", "Description": "Browse market records"},
-                {"Endpoint": "/v1/market/{market_id}", "Description": "Historical observations for one market"},
-                {"Endpoint": "/v1/platforms", "Description": "Platform-level dataset coverage"},
-                {"Endpoint": "/v1/movers", "Description": "Largest recent market moves"},
-                {"Endpoint": "/v1/categories", "Description": "Category-level market counts"},
-                {"Endpoint": "/v1/account", "Description": "Authenticated account and usage status"},
-            ]
-        )
+        endpoints = pd.DataFrame([
+            {"Endpoint": "/v1/health", "Description": "Dataset health and latest snapshot metadata"},
+            {"Endpoint": "/v1/stats", "Description": "Snapshot, market, and platform counts"},
+            {"Endpoint": "/v1/latest", "Description": "Latest market rows"},
+            {"Endpoint": "/v1/search?q=bitcoin", "Description": "Search latest markets by keyword"},
+            {"Endpoint": "/v1/markets", "Description": "Browse market records"},
+            {"Endpoint": "/v1/market/{market_id}", "Description": "Historical observations for one market"},
+            {"Endpoint": "/v1/platforms", "Description": "Platform-level dataset coverage"},
+            {"Endpoint": "/v1/movers", "Description": "Largest recent market moves"},
+            {"Endpoint": "/v1/categories", "Description": "Category-level market counts"},
+            {"Endpoint": "/v1/account", "Description": "Authenticated account and usage status"},
+        ])
         show_df(endpoints)
 
 except Exception as exc:

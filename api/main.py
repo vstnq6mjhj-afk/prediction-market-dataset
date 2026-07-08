@@ -7,6 +7,7 @@ import math
 import os
 import secrets
 import time
+from urllib.parse import urlencode
 from typing import Optional
 
 import duckdb
@@ -171,7 +172,7 @@ def ensure_api_key_for_user(email: str, user_id: Optional[str] = None):
         if not row.get("api_key"):
             updates["api_key"] = make_api_key()
         if not row.get("plan"):
-            updates["plan"] = "developer"
+            updates["plan"] = "free"
         if row.get("active") is None:
             updates["active"] = True
         if row.get("daily_limit") is None:
@@ -204,7 +205,7 @@ def ensure_api_key_for_user(email: str, user_id: Optional[str] = None):
         "user_id": user_id,
         "email": email,
         "api_key": api_key,
-        "plan": "developer",
+        "plan": "free",
         "active": True,
         "daily_limit": 100,
         "requests_today": 0,
@@ -215,7 +216,7 @@ def ensure_api_key_for_user(email: str, user_id: Optional[str] = None):
         "user_id": user_id,
         "email": email,
         "api_key": api_key,
-        "plan": "developer",
+        "plan": "free",
         "active": True,
         "daily_limit": 100,
         "requests_today": 0,
@@ -233,6 +234,28 @@ def get_api_key_row_by_email(email: str):
     )
     return result.data[0] if result.data else None
 
+
+
+
+def require_active_subscription(account=Depends(verify_api_key)):
+    """Allow /v1/account for all valid keys, but require paid subscription for dataset endpoints."""
+    result = (
+        supabase.table("api_keys")
+        .select("plan,subscription_status,daily_limit,requests_today")
+        .eq("api_key", account["api_key"])
+        .limit(1)
+        .execute()
+    )
+    row = result.data[0] if result.data else {}
+    account.update(row)
+
+    if str(row.get("subscription_status", "free")).lower() != "active":
+        raise HTTPException(
+            status_code=402,
+            detail="A paid subscription is required to access the Prediction Market Dataset API.",
+        )
+
+    return account
 
 def page_shell(title: str, body: str) -> str:
     return f"""
@@ -282,7 +305,7 @@ footer {{ margin-top:70px; text-align:center; color:#64748b; }}
 
 
 @app.get("/v1/health")
-def health(account=Depends(verify_api_key)):
+def health(account=Depends(require_active_subscription)):
     rows = query_db("""
         SELECT
             COUNT(*) AS total_rows,
@@ -296,7 +319,7 @@ def health(account=Depends(verify_api_key)):
 
 
 @app.get("/v1/latest")
-def latest(account=Depends(verify_api_key), platform: Optional[str] = None, limit: int = Query(100, ge=1, le=1000)):
+def latest(account=Depends(require_active_subscription), platform: Optional[str] = None, limit: int = Query(100, ge=1, le=1000)):
     where = ""
     params = [limit]
     if platform:
@@ -321,7 +344,7 @@ def latest(account=Depends(verify_api_key), platform: Optional[str] = None, limi
 
 
 @app.get("/v1/platforms")
-def platforms(account=Depends(verify_api_key)):
+def platforms(account=Depends(require_active_subscription)):
     rows = query_db("""
         SELECT
             platform,
@@ -340,7 +363,7 @@ def platforms(account=Depends(verify_api_key)):
 
 
 @app.get("/v1/markets")
-def markets(account=Depends(verify_api_key), q: Optional[str] = None, platform: Optional[str] = None, limit: int = Query(100, ge=1, le=1000)):
+def markets(account=Depends(require_active_subscription), q: Optional[str] = None, platform: Optional[str] = None, limit: int = Query(100, ge=1, le=1000)):
     filters = []
     params = []
     if q:
@@ -364,7 +387,7 @@ def markets(account=Depends(verify_api_key), q: Optional[str] = None, platform: 
 
 
 @app.get("/v1/market/{market_id}")
-def market_detail(market_id: str, account=Depends(verify_api_key)):
+def market_detail(market_id: str, account=Depends(require_active_subscription)):
     rows = query_db("""
         SELECT *
         FROM market_snapshots
@@ -379,7 +402,7 @@ def market_detail(market_id: str, account=Depends(verify_api_key)):
 
 
 @app.get("/v1/movers")
-def movers(account=Depends(verify_api_key), limit: int = Query(100, ge=1, le=500)):
+def movers(account=Depends(require_active_subscription), limit: int = Query(100, ge=1, le=500)):
     rows = query_db("""
         WITH latest AS (SELECT MAX(snapshot_time) AS max_time FROM market_snapshots),
         recent AS (
@@ -416,7 +439,8 @@ def movers(account=Depends(verify_api_key), limit: int = Query(100, ge=1, le=500
 def account(account=Depends(verify_api_key)):
     return {
         "email": account["email"],
-        "plan": account.get("plan", account.get("tier", "developer")),
+        "plan": account.get("plan", account.get("tier", "free")),
+        "subscription_status": account.get("subscription_status", "free"),
         "requests_today": account["requests_today"],
         "daily_limit": account["daily_limit"],
         "remaining": account["remaining"],
@@ -432,7 +456,7 @@ def regenerate_api_key(account=Depends(verify_api_key)):
 
 
 @app.get("/v1/search")
-def search(q: str, account=Depends(verify_api_key), limit: int = Query(50, ge=1, le=200)):
+def search(q: str, account=Depends(require_active_subscription), limit: int = Query(50, ge=1, le=200)):
     rows = query_db("""
         SELECT *
         FROM market_snapshots
@@ -446,7 +470,7 @@ def search(q: str, account=Depends(verify_api_key), limit: int = Query(50, ge=1,
 
 
 @app.get("/v1/categories")
-def categories(account=Depends(verify_api_key)):
+def categories(account=Depends(require_active_subscription)):
     rows = query_db("""
         SELECT LOWER(COALESCE(NULLIF(TRIM(category), ''), 'unknown')) AS category, COUNT(*) AS markets
         FROM (
@@ -461,7 +485,7 @@ def categories(account=Depends(verify_api_key)):
 
 
 @app.get("/v1/stats")
-def stats(account=Depends(verify_api_key)):
+def stats(account=Depends(require_active_subscription)):
     row = query_db("""
         SELECT
             COUNT(*) AS snapshots,
@@ -588,9 +612,11 @@ def dashboard(request: Request):
     requests_today = row.get("requests_today", 0) or 0
     daily_limit = row.get("daily_limit", 100) or 100
     usage_pct = min(int((requests_today / daily_limit) * 100), 100)
-    plan = row.get("plan", "developer")
+    plan = row.get("plan", "free")
     subscription_status = row.get("subscription_status", "free")
+    display_plan = plan if str(subscription_status).lower() == "active" else "free"
     api_key = row.get("api_key", "")
+    explorer_url = DATASET_EXPLORER_URL + "?" + urlencode({"api_key": api_key})
 
     body = f"""
 <div class="header">
@@ -601,7 +627,7 @@ def dashboard(request: Request):
     <a href="/logout">Logout</a>
 </div>
 <div class="grid">
-    <div class="card"><div class="label">Current Plan</div><div class="value">{escape(plan).upper()}</div><p class="label">Status: {escape(subscription_status)}</p></div>
+    <div class="card"><div class="label">Current Plan</div><div class="value">{escape(display_plan).upper()}</div><p class="label">Status: {escape(subscription_status)}</p></div>
     <div class="card"><div class="label">Requests Today</div><div class="value">{requests_today:,} / {daily_limit:,}</div><div class="progress"><div class="bar" style="width:{usage_pct}%"></div></div><p class="label">{usage_pct}% used</p></div>
     <div class="card"><div class="label">Daily Limit</div><div class="value">{daily_limit:,}</div><p class="label">Upgrade for higher limits.</p></div>
 </div>
@@ -611,7 +637,7 @@ def dashboard(request: Request):
 </div>
 <div class="actions">
     <a class="button" href="/docs">View API Docs</a>
-    <a class="button secondary" href="{escape(DATASET_EXPLORER_URL)}" target="_blank">Open Dataset Explorer</a>
+    <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
     <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
     <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
     <a class="button secondary" href="/pricing">View Plans & Billing</a>
