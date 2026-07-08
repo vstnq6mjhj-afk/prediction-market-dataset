@@ -1006,11 +1006,23 @@ try:
 
     elif page == "Movers":
         st.subheader("Market Movers")
+        st.caption("Showing the largest moves from the most recent 2 days of snapshots.")
 
         movers = sql_df(
             conn,
             f"""
-            WITH market_changes AS (
+            WITH latest_time AS (
+                SELECT MAX(snapshot_time) AS max_time
+                FROM market_snapshots
+            ),
+            recent AS (
+                SELECT *
+                FROM market_snapshots
+                WHERE snapshot_time >= (SELECT max_time FROM latest_time) - INTERVAL '2 days'
+                  AND yes_price IS NOT NULL
+                  {latest_extra_filter()}
+            ),
+            market_changes AS (
                 SELECT
                     platform,
                     market_id,
@@ -1023,11 +1035,9 @@ try:
                     LAST(yes_price ORDER BY snapshot_time) - FIRST(yes_price ORDER BY snapshot_time) AS price_change,
                     LAST(volume ORDER BY snapshot_time) - FIRST(volume ORDER BY snapshot_time) AS volume_change,
                     LAST(liquidity ORDER BY snapshot_time) - FIRST(liquidity ORDER BY snapshot_time) AS liquidity_change
-                FROM market_snapshots
-                WHERE yes_price IS NOT NULL
-                {latest_extra_filter()}
+                FROM recent
                 GROUP BY platform, market_id, title
-                HAVING COUNT(*) >= 3
+                HAVING COUNT(*) >= 2
             )
             SELECT *
             FROM market_changes
@@ -1110,55 +1120,79 @@ try:
 
     elif page == "Market Detail":
         st.subheader("Market Detail")
-
-        market_where = where_clause if where_clause else "WHERE market_id IS NOT NULL"
-        if where_clause:
-            market_where += " AND market_id IS NOT NULL"
+        st.caption("Select a market from the latest snapshot, then view up to 1,000 historical observations.")
 
         markets = sql_df(
             conn,
             f"""
-            SELECT DISTINCT
+            WITH latest AS (
+                SELECT *
+                FROM market_snapshots
+                WHERE snapshot_time = (
+                    SELECT MAX(snapshot_time)
+                    FROM market_snapshots
+                )
+            )
+            SELECT
+                platform,
                 market_id,
-                title,
-                platform
-            FROM market_snapshots
-            {market_where}
-            ORDER BY title
-            LIMIT 3000
+                MAX(title) AS title,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM latest
+            WHERE market_id IS NOT NULL
+            {latest_extra_filter()}
+            GROUP BY platform, market_id
+            ORDER BY latest_snapshot DESC
+            LIMIT 1000
             """,
         )
 
         if markets.empty:
             st.info("No markets found.")
         else:
-            markets["label"] = markets["title"].fillna("").str[:120] + " | " + markets["market_id"].fillna("")
+            markets["label"] = (
+                markets["platform"].fillna("").astype(str)
+                + " | "
+                + markets["title"].fillna("").astype(str).str[:120]
+                + " | "
+                + markets["market_id"].fillna("").astype(str)
+            )
+
             selected_label = st.selectbox(
                 "Select a market",
                 markets["label"].tolist(),
                 key="market_detail_selected_market",
             )
 
-            selected_market_id = markets.loc[markets["label"] == selected_label, "market_id"].iloc[0]
+            selected_row = markets.loc[markets["label"] == selected_label].iloc[0]
+            selected_platform_detail = selected_row["platform"]
+            selected_market_id = selected_row["market_id"]
+
             history = sql_df(
                 conn,
                 """
-                SELECT
-                    snapshot_time,
-                    platform,
-                    market_id,
-                    title,
-                    yes_price,
-                    no_price,
-                    volume,
-                    liquidity,
-                    status,
-                    raw_url
-                FROM market_snapshots
-                WHERE market_id = ?
+                SELECT *
+                FROM (
+                    SELECT
+                        snapshot_time,
+                        platform,
+                        market_id,
+                        title,
+                        yes_price,
+                        no_price,
+                        volume,
+                        liquidity,
+                        status,
+                        raw_url
+                    FROM market_snapshots
+                    WHERE platform = ?
+                      AND market_id = ?
+                    ORDER BY snapshot_time DESC
+                    LIMIT 1000
+                )
                 ORDER BY snapshot_time
                 """,
-                [selected_market_id],
+                [selected_platform_detail, selected_market_id],
             )
 
             show_df(history.tail(25))
@@ -1170,7 +1204,7 @@ try:
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Latest YES", latest_row.get("yes_price"))
                 c2.metric("Latest Volume", latest_row.get("volume"))
-                c3.metric("Observations", len(history))
+                c3.metric("Observations Loaded", len(history))
 
                 st.subheader("YES Price History")
                 price_df = history.dropna(subset=["yes_price"])
@@ -1210,7 +1244,7 @@ try:
                 st.download_button(
                     "Download Market CSV",
                     history.to_csv(index=False),
-                    file_name=f"{selected_market_id}.csv",
+                    file_name=f"{selected_platform_detail}_{selected_market_id}.csv",
                     mime="text/csv",
                 )
 
