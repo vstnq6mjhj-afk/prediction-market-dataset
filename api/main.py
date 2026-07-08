@@ -764,19 +764,9 @@ a {{
         </button>
     </form>
 
-    <form method="post" action="/billing/checkout/developer" style="margin:0;">
-    <input type="hidden" name="email" value="{row["email"]}">
-    <button class="button secondary" type="submit">
-        Upgrade to Developer
-    </button>
-</form>
-
-<form method="post" action="/billing/checkout/professional" style="margin:0;">
-    <input type="hidden" name="email" value="{row["email"]}">
-    <button class="button secondary" type="submit">
-        Upgrade to Professional
-    </button>
-</form>
+    <a class="button secondary" href="/pricing?email={row["email"]}">
+        View Plans & Billing
+    </a>
 </div>
 
 <script>
@@ -803,6 +793,220 @@ def dashboard_regenerate_api_key(email: str = Form(...)):
     )
 
     return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
+
+@app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
+def pricing_page(email: str = ""):
+    email_input = f'<input type="hidden" name="email" value="{email}">' if email else ""
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<title>Pricing | Prediction Market Dataset</title>
+<style>
+body {{
+    margin:0;
+    background:#0b1020;
+    font-family:Arial,sans-serif;
+    color:white;
+}}
+.container {{
+    max-width:1150px;
+    margin:auto;
+    padding:60px 24px;
+}}
+.header {{
+    text-align:center;
+    margin-bottom:50px;
+}}
+h1 {{
+    font-size:52px;
+    margin-bottom:12px;
+}}
+.subtitle {{
+    color:#94a3b8;
+    font-size:18px;
+}}
+.grid {{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:24px;
+}}
+.card {{
+    background:#111827;
+    border:1px solid #1f2937;
+    border-radius:20px;
+    padding:32px;
+    box-shadow:0 20px 60px rgba(0,0,0,.35);
+}}
+.card.featured {{
+    border-color:#38bdf8;
+    transform:scale(1.03);
+}}
+.plan {{
+    font-size:24px;
+    font-weight:bold;
+}}
+.price {{
+    font-size:42px;
+    font-weight:bold;
+    color:#38bdf8;
+    margin:20px 0;
+}}
+.desc {{
+    color:#cbd5e1;
+    min-height:70px;
+}}
+ul {{
+    padding-left:20px;
+    color:#cbd5e1;
+    line-height:1.9;
+}}
+button, .button {{
+    display:block;
+    width:100%;
+    box-sizing:border-box;
+    text-align:center;
+    padding:14px 18px;
+    margin-top:24px;
+    border:none;
+    border-radius:10px;
+    background:#22c55e;
+    color:white;
+    font-size:16px;
+    font-weight:bold;
+    cursor:pointer;
+    text-decoration:none;
+}}
+.secondary {{
+    background:#1e293b;
+}}
+.note {{
+    margin-top:50px;
+    background:#111827;
+    border:1px solid #1f2937;
+    border-radius:18px;
+    padding:28px;
+    color:#cbd5e1;
+}}
+.back {{
+    display:inline-block;
+    margin-bottom:30px;
+    color:#38bdf8;
+    text-decoration:none;
+}}
+@media(max-width:900px) {{
+    .grid {{
+        grid-template-columns:1fr;
+    }}
+    .card.featured {{
+        transform:none;
+    }}
+}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<a class="back" href="/dashboard?email={email}">← Back to Dashboard</a>
+
+<div class="header">
+    <h1>Plans & Billing</h1>
+    <p class="subtitle">
+        Choose the right level of access for the Prediction Market Dataset platform.
+    </p>
+</div>
+
+<div class="grid">
+
+    <div class="card">
+        <div class="plan">Developer</div>
+        <div class="price">£19/mo</div>
+        <p class="desc">
+            For individual developers, testing, prototypes, and small research projects.
+        </p>
+
+        <ul>
+            <li>Prediction market REST API</li>
+            <li>Dataset Explorer access</li>
+            <li>Market search</li>
+            <li>Latest snapshots</li>
+            <li>Historical market detail</li>
+            <li>1,000 API requests/day</li>
+        </ul>
+
+        <form method="post" action="/billing/checkout/developer">
+            {email_input}
+            <button type="submit">Subscribe to Developer</button>
+        </form>
+    </div>
+
+    <div class="card featured">
+        <div class="plan">Professional</div>
+        <div class="price">£49/mo</div>
+        <p class="desc">
+            For serious users, researchers, data teams, and production applications.
+        </p>
+
+        <ul>
+            <li>Everything in Developer</li>
+            <li>Higher request limits</li>
+            <li>Priority data access</li>
+            <li>Advanced dataset exploration</li>
+            <li>CSV/JSON export workflows</li>
+            <li>10,000 API requests/day</li>
+        </ul>
+
+        <form method="post" action="/billing/checkout/professional">
+            {email_input}
+            <button type="submit">Subscribe to Professional</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="plan">Enterprise</div>
+        <div class="price">Custom</div>
+        <p class="desc">
+            For companies, funds, universities, and teams needing custom access.
+        </p>
+
+        <ul>
+            <li>Custom API limits</li>
+            <li>Bulk dataset exports</li>
+            <li>Custom data delivery</li>
+            <li>Team access</li>
+            <li>Priority support</li>
+            <li>Commercial licensing</li>
+        </ul>
+
+        <a class="button secondary" href="mailto:jjb9gvh6wq@privaterelay.appleid.com">
+            Contact Sales
+        </a>
+    </div>
+
+</div>
+
+<div class="note">
+    <h2>What you get</h2>
+    <p>
+        Prediction Market Dataset is a unified dataset platform for historical and live
+        prediction market data across Polymarket, Kalshi, Manifold, and PredictIt.
+    </p>
+    <p>
+        Your subscription gives you access to API keys, the developer dashboard,
+        dataset explorer, searchable market data, historical snapshots, and export-ready
+        data workflows.
+    </p>
+    <p>
+        Longer billing cycles — 3-month, 6-month, and annual plans — will be added after
+        the monthly Stripe flow is live and tested.
+    </p>
+</div>
+
+</div>
+</body>
+</html>
+"""
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
