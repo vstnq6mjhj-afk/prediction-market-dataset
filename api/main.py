@@ -745,15 +745,46 @@ a {{
         Open Dataset Explorer
     </a>
 
+    <button class="button secondary" onclick="copyApiKey()">
+        Copy API Key
+    </button>
+
+    <form method="post" action="/dashboard/api-key/regenerate" style="margin:0;">
+        <input type="hidden" name="email" value="{row["email"]}">
+        <button class="button danger" type="submit">
+            Regenerate API Key
+        </button>
+    </form>
+
     <a class="button secondary" href="/#pricing">
         Upgrade Plan
     </a>
 </div>
 
+<script>
+function copyApiKey() {{
+    navigator.clipboard.writeText("{row["api_key"]}");
+    alert("API key copied");
+}}
+</script>
+
 </div>
 </body>
 </html>
 """
+
+@app.post("/dashboard/api-key/regenerate", include_in_schema=False)
+def dashboard_regenerate_api_key(email: str = Form(...)):
+    new_key = make_api_key()
+
+    result = (
+        supabase.table("api_keys")
+        .update({"api_key": new_key})
+        .eq("email", email)
+        .execute()
+    )
+
+    return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
@@ -802,6 +833,17 @@ def root():
             .secondary {
                 border: 1px solid #475569;
                 color: #f8fafc;
+            }
+            .danger {
+                background:#dc2626;
+            }
+
+            .danger:hover {
+                background:#b91c1c;
+            }
+
+            .actions form {
+                display:inline;
             }
             .stats, .features, .pricing {
                 display: grid;
