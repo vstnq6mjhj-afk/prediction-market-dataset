@@ -1008,6 +1008,85 @@ button, .button {{
 </html>
 """
 
+@app.post("/billing/checkout/developer", include_in_schema=False)
+def create_developer_checkout(email: str = Form(...)):
+    return create_checkout_session(
+        email=email,
+        plan="developer",
+        price_id=STRIPE_DEVELOPER_PRICE_ID,
+    )
+
+
+@app.post("/billing/checkout/professional", include_in_schema=False)
+def create_professional_checkout(email: str = Form(...)):
+    return create_checkout_session(
+        email=email,
+        plan="professional",
+        price_id=STRIPE_PROFESSIONAL_PRICE_ID,
+    )
+
+
+def create_checkout_session(email: str, plan: str, price_id: str):
+    if not STRIPE_SECRET_KEY:
+        return HTMLResponse(
+            "<h1>Stripe secret key is not configured</h1>",
+            status_code=500
+        )
+
+    if not price_id:
+        return HTMLResponse(
+            "<h1>Stripe price ID is not configured</h1>",
+            status_code=500
+        )
+
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer_email=email,
+            line_items=[
+                {
+                    "price": price_id,
+                    "quantity": 1,
+                }
+            ],
+            success_url=f"{APP_BASE_URL}/billing/success?email={email}&plan={plan}",
+            cancel_url=f"{APP_BASE_URL}/pricing?email={email}",
+            metadata={
+                "email": email,
+                "plan": plan,
+            },
+            subscription_data={
+                "metadata": {
+                    "email": email,
+                    "plan": plan,
+                }
+            },
+        )
+
+        return RedirectResponse(checkout_session.url, status_code=303)
+
+    except Exception as e:
+        return HTMLResponse(
+            f"<h1>Stripe checkout failed</h1><pre>{str(e)}</pre>",
+            status_code=500
+        )
+
+
+@app.get("/billing/success", response_class=HTMLResponse, include_in_schema=False)
+def billing_success(email: str, plan: str):
+    if plan == "professional":
+        daily_limit = 10000
+    else:
+        daily_limit = 1000
+
+    supabase.table("api_keys").update({
+        "plan": plan,
+        "subscription_status": "active",
+        "daily_limit": daily_limit,
+    }).eq("email", email).execute()
+
+    return RedirectResponse(url=f"/dashboard?email={email}", status_code=303)
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
     return """
@@ -1116,7 +1195,8 @@ def root():
                 </p>
                 <div class="buttons">
                     <a class="primary" href="/docs">View API Docs</a>
-                    <a class="secondary" href="#pricing">View Pricing</a>
+                    <a class="secondary" href="/signup">Create Account</a>
+                    <a class="secondary" href="/login">Login</a>
                 </div>
             </section>
 
