@@ -723,15 +723,14 @@ def dashboard(request: Request):
     explorer_url = DATASET_EXPLORER_URL + "?" + urlencode({"api_key": api_key})
 
     body = f"""
-<div class="header">
-    <div>
-        <h1>Customer Dashboard</h1>
-        <p class="label">Welcome back, {escape(email)}</p>
-    </div>
-    <a href="/logout">Logout</a>
+<div style="text-align:center; position:relative; margin-bottom:30px;">
+    <a href="/logout" style="position:absolute; right:0; top:8px;">Logout</a>
+    <h1>Customer Dashboard</h1>
+    <p class="label">Welcome back, {escape(email)}</p>
 </div>
-<div class="card" style="margin-top:25px;">
-    <div class="actions" style="margin-top:0; justify-content:center;">
+
+<div class="card" style="max-width:1060px; margin:0 auto 24px; text-align:center;">
+    <div class="actions" style="margin-top:0; justify-content:center; gap:14px;">
         <a class="button" href="/docs">View API Docs</a>
         <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
         <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
@@ -739,16 +738,17 @@ def dashboard(request: Request):
         <a class="button secondary" href="/pricing">View Plans & Billing</a>
         <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
     </div>
-
-    <div style="max-width:850px; margin:32px auto 0; text-align:center;">
-        <div class="label">Your API Key</div>
-        <div class="api-key" id="apiKey" style="text-align:left;">{escape(api_key)}</div>
-    </div>
 </div>
-<div class="grid" style="margin-top:25px;">
-    <div class="card"><div class="label">Current Plan</div><div class="value">{escape(display_plan).upper()}</div><p class="label">Status: {escape(status_label)}</p></div>
-    <div class="card"><div class="label">Requests Today</div><div class="value">{requests_today:,} / {daily_limit:,}</div><div class="progress"><div class="bar" style="width:{usage_pct}%"></div></div><p class="label">{usage_pct}% used</p></div>
-    <div class="card"><div class="label">Daily Limit</div><div class="value">{daily_limit:,}</div><p class="label">Upgrade for higher limits.</p></div>
+
+<div class="card" style="max-width:850px; margin:0 auto 24px; text-align:center;">
+    <div class="label">Your API Key</div>
+    <div class="api-key" id="apiKey" style="text-align:center; margin-left:auto; margin-right:auto;">{escape(api_key)}</div>
+</div>
+
+<div class="grid" style="max-width:1060px; margin:0 auto;">
+    <div class="card" style="text-align:center;"><div class="label">Current Plan</div><div class="value">{escape(display_plan).upper()}</div><p class="label">Status: {escape(status_label)}</p></div>
+    <div class="card" style="text-align:center;"><div class="label">Requests Today</div><div class="value">{requests_today:,} / {daily_limit:,}</div><div class="progress"><div class="bar" style="width:{usage_pct}%"></div></div><p class="label">{usage_pct}% used</p></div>
+    <div class="card" style="text-align:center;"><div class="label">Daily Limit</div><div class="value">{daily_limit:,}</div><p class="label">Upgrade for higher limits.</p></div>
 </div>
 <script>
 function copyApiKey() {{
