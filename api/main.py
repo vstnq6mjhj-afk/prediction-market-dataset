@@ -583,7 +583,13 @@ def root():
 </section>
 <h2>Example Request</h2>
 <code>GET /v1/search?q=bitcoin<br>Authorization: Bearer YOUR_API_KEY</code>
-<footer>Prediction Market Dataset API · Live cross-platform market data</footer>
+<footer>
+    Prediction Market Dataset API · Live cross-platform market data
+    <br><br>
+    <a href="/terms">Terms</a> ·
+    <a href="/privacy">Privacy</a> ·
+    <a href="/contact">Contact</a>
+</footer>
 """
     return page_shell("Home", body)
 
@@ -718,7 +724,163 @@ def dashboard_regenerate_api_key(request: Request):
     supabase.table("api_keys").update({"api_key": make_api_key()}).eq("email", email).execute()
     return RedirectResponse(url="/dashboard", status_code=303)
 
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+def terms_page():
+    body = """
+<h1>Terms of Service</h1>
 
+<p>Last updated: July 2026</p>
+
+<div class="card">
+    <h2>1. Service</h2>
+    <p>
+        Prediction Market Dataset provides access to historical and live prediction
+        market data through a customer dashboard, dataset explorer, and REST API.
+    </p>
+
+    <h2>2. Dataset Use</h2>
+    <p>
+        The service is intended for research, analysis, development, and data access.
+        We do not provide financial advice, trading advice, betting advice, or investment recommendations.
+    </p>
+
+    <h2>3. Accounts and API Keys</h2>
+    <p>
+        Customers are responsible for keeping their account credentials and API keys secure.
+        API keys must not be shared publicly or used in abusive, fraudulent, or unlawful ways.
+    </p>
+
+    <h2>4. Subscriptions and Billing</h2>
+    <p>
+        Paid plans are billed through Stripe. Subscription access, API limits, and dataset
+        features depend on the plan selected. Customers can manage billing through the customer dashboard.
+    </p>
+
+    <h2>5. Availability</h2>
+    <p>
+        We aim to provide reliable access to the dataset, but we do not guarantee uninterrupted
+        availability, completeness, or error-free operation.
+    </p>
+
+    <h2>6. Data Accuracy</h2>
+    <p>
+        Prediction market data may come from third-party platforms. We work to normalize and maintain
+        the dataset, but customers should independently verify data before relying on it.
+    </p>
+
+    <h2>7. Prohibited Use</h2>
+    <p>
+        Customers may not overload the API, reverse engineer the service, resell access without permission,
+        or use the service for unlawful purposes.
+    </p>
+
+    <h2>8. Termination</h2>
+    <p>
+        We may suspend or terminate access for abuse, non-payment, or breach of these terms.
+    </p>
+
+    <h2>9. Contact</h2>
+    <p>
+        Questions about these terms can be sent through the contact page.
+    </p>
+</div>
+
+<p><a href="/">← Back home</a></p>
+"""
+    return page_shell("Terms of Service", body)
+
+
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_page():
+    body = """
+<h1>Privacy Policy</h1>
+
+<p>Last updated: July 2026</p>
+
+<div class="card">
+    <h2>1. Information We Collect</h2>
+    <p>
+        We collect account information such as email address, login details, subscription status,
+        API usage, and billing identifiers needed to operate the service.
+    </p>
+
+    <h2>2. Payment Information</h2>
+    <p>
+        Payments are processed by Stripe. We do not store full card numbers on our servers.
+        Stripe may process payment method, invoice, and billing information.
+    </p>
+
+    <h2>3. API Usage Data</h2>
+    <p>
+        We may record API request counts, endpoint usage, timestamps, and account-level usage
+        statistics to enforce plan limits and improve the service.
+    </p>
+
+    <h2>4. How We Use Information</h2>
+    <p>
+        We use information to provide accounts, manage subscriptions, secure API access,
+        operate the dataset platform, and support customers.
+    </p>
+
+    <h2>5. Data Sharing</h2>
+    <p>
+        We do not sell customer data. We may share necessary information with service providers
+        such as Stripe, Supabase, Render, and infrastructure providers used to operate the platform.
+    </p>
+
+    <h2>6. Security</h2>
+    <p>
+        We use reasonable technical and organizational measures to protect account and service data.
+        Customers should keep API keys and passwords secure.
+    </p>
+
+    <h2>7. Data Retention</h2>
+    <p>
+        We retain account, billing, and usage records as needed to operate the service,
+        comply with obligations, and resolve disputes.
+    </p>
+
+    <h2>8. Contact</h2>
+    <p>
+        Privacy questions can be sent through the contact page.
+    </p>
+</div>
+
+<p><a href="/">← Back home</a></p>
+"""
+    return page_shell("Privacy Policy", body)
+
+
+@app.get("/contact", response_class=HTMLResponse, include_in_schema=False)
+def contact_page():
+    body = """
+<h1>Contact</h1>
+
+<div class="card">
+    <p>
+        For support, billing questions, enterprise access, dataset questions, or API issues,
+        contact the Prediction Market Dataset team.
+    </p>
+
+    <p>
+        <strong>Email:</strong>
+        <a href="mailto:jjb9gvh6wq@privaterelay.appleid.com">
+            jjb9gvh6wq@privaterelay.appleid.com
+        </a>
+    </p>
+
+    <h2>Useful details to include</h2>
+    <ul>
+        <li>Your account email</li>
+        <li>Your plan</li>
+        <li>The API endpoint or dashboard page involved</li>
+        <li>Any error message you received</li>
+    </ul>
+</div>
+
+<p><a href="/">← Back home</a></p>
+"""
+    return page_shell("Contact", body)
 
 @app.api_route("/billing/portal", methods=["GET", "POST"], include_in_schema=False)
 async def create_billing_portal(request: Request):
