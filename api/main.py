@@ -256,16 +256,26 @@ def stripe_timestamp_to_iso(value) -> Optional[str]:
 
 
 def safe_update_api_keys(updates: dict, column: str, value: str):
-    """Update api_keys, falling back if optional billing columns are missing."""
+    """Update api_keys without ever crashing user-facing pages.
+
+    Optional billing columns may be missing or temporarily unavailable during deploys.
+    If a full update fails, retry without those optional fields. If that also fails,
+    return None so the dashboard can still load.
+    """
     try:
         return supabase.table("api_keys").update(updates).eq(column, value).execute()
     except Exception:
-        fallback = {
-            key: val
-            for key, val in updates.items()
-            if key not in {"cancel_at_period_end", "current_period_end"}
-        }
-        return supabase.table("api_keys").update(fallback).eq(column, value).execute()
+        try:
+            fallback = {
+                key: val
+                for key, val in updates.items()
+                if key not in {"cancel_at_period_end", "current_period_end"}
+            }
+            if fallback:
+                return supabase.table("api_keys").update(fallback).eq(column, value).execute()
+        except Exception:
+            return None
+    return None
 
 
 def update_subscription_by_email(
@@ -795,8 +805,12 @@ def dashboard(request: Request):
         row = ensure_api_key_for_user(email=email)
 
     # Keep billing cancellation state fresh even if a Stripe webhook was missed.
-    sync_subscription_from_stripe(email, row)
-    row = get_api_key_row_by_email(email) or row
+    # Never allow Stripe/Supabase sync issues to break the dashboard page.
+    try:
+        sync_subscription_from_stripe(email, row)
+        row = get_api_key_row_by_email(email) or row
+    except Exception:
+        pass
 
     requests_today = row.get("requests_today", 0) or 0
     daily_limit = row.get("daily_limit", 100) or 100
