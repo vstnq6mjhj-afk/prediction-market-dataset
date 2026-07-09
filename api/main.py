@@ -731,15 +731,18 @@ def dashboard(request: Request):
     <a href="/logout">Logout</a>
 </div>
 <div class="card" style="margin-top:25px;">
-    <div class="label">Your API Key</div>
-    <div class="api-key" id="apiKey">{escape(api_key)}</div>
-    <div class="actions">
+    <div class="actions" style="margin-top:0; justify-content:center;">
         <a class="button" href="/docs">View API Docs</a>
         <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
         <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
         <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
         <a class="button secondary" href="/pricing">View Plans & Billing</a>
         <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
+    </div>
+
+    <div style="max-width:850px; margin:32px auto 0; text-align:center;">
+        <div class="label">Your API Key</div>
+        <div class="api-key" id="apiKey" style="text-align:left;">{escape(api_key)}</div>
     </div>
 </div>
 <div class="grid" style="margin-top:25px;">
