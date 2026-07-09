@@ -412,21 +412,43 @@ def sync_subscription_from_stripe(email: str, row: dict):
         return
 
     active_statuses = {"active", "trialing", "past_due", "unpaid"}
-    selected = None
 
-    for subscription in subscription_data:
-        sub_dict = stripe_object_to_dict(subscription)
-        if str(sub_dict.get("status") or "").lower() in active_statuses:
+    # A customer may have multiple subscriptions from testing/upgrades.
+    # Prefer the active/trialing subscription that is scheduled to cancel,
+    # because that is the status the customer portal is currently showing.
+    selected = None
+    normalized_subscriptions = [stripe_object_to_dict(item) for item in subscription_data]
+
+    for sub_dict in normalized_subscriptions:
+        status_value = str(sub_dict.get("status") or "").lower()
+        if status_value in active_statuses and bool(sub_dict.get("cancel_at_period_end")):
             selected = sub_dict
             break
 
+    # Otherwise use the newest active/trialing/past_due/unpaid subscription.
     if selected is None:
-        selected = stripe_object_to_dict(subscription_data[0])
+        for sub_dict in normalized_subscriptions:
+            status_value = str(sub_dict.get("status") or "").lower()
+            if status_value in active_statuses:
+                selected = sub_dict
+                break
+
+    # Final fallback: newest subscription Stripe returned.
+    if selected is None and normalized_subscriptions:
+        selected = normalized_subscriptions[0]
+
+    if not selected:
+        return
 
     status = str(selected.get("status") or "free").lower()
     plan = infer_plan_from_stripe_subscription(selected)
     cancel_at_period_end = bool(selected.get("cancel_at_period_end"))
-    current_period_end = stripe_timestamp_to_iso(selected.get("current_period_end"))
+
+    # Stripe usually provides current_period_end; for cancel-at-period-end,
+    # cancel_at is another reliable end-date field, so use it as fallback.
+    current_period_end = stripe_timestamp_to_iso(
+        selected.get("current_period_end") or selected.get("cancel_at")
+    )
 
     if status in {"active", "trialing"}:
         update_subscription_by_email(
