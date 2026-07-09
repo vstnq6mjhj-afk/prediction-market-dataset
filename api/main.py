@@ -421,7 +421,7 @@ def sync_subscription_from_stripe(email: str, row: dict):
 
     for sub_dict in normalized_subscriptions:
         status_value = str(sub_dict.get("status") or "").lower()
-        if status_value in active_statuses and bool(sub_dict.get("cancel_at_period_end")):
+        if status_value in active_statuses and bool(sub_dict.get("cancel_at_period_end") or sub_dict.get("cancel_at")):
             selected = sub_dict
             break
 
@@ -442,7 +442,7 @@ def sync_subscription_from_stripe(email: str, row: dict):
 
     status = str(selected.get("status") or "free").lower()
     plan = infer_plan_from_stripe_subscription(selected)
-    cancel_at_period_end = bool(selected.get("cancel_at_period_end"))
+    cancel_at_period_end = bool(selected.get("cancel_at_period_end") or selected.get("cancel_at"))
 
     # Stripe usually provides current_period_end; for cancel-at-period-end,
     # cancel_at is another reliable end-date field, so use it as fallback.
@@ -900,6 +900,7 @@ def dashboard(request: Request):
         <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
         <a class="button secondary" href="/pricing">View Plans & Billing</a>
         <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
+        <form method="post" action="/billing/sync"><button class="button secondary" type="submit">Sync Billing</button></form>
     </div>
 </div>
 
@@ -1189,6 +1190,73 @@ async def create_billing_portal(request: Request):
             status_code=500,
         )
 
+
+
+@app.post("/billing/sync", include_in_schema=False)
+def billing_sync_now(request: Request):
+    """Force-refresh local billing fields from Stripe for the logged-in user."""
+    email = require_portal_user(request)
+    if not email:
+        return RedirectResponse(url="/login", status_code=303)
+
+    row = get_api_key_row_by_email(email)
+    if row:
+        try:
+            sync_subscription_from_stripe(email, row)
+        except Exception:
+            pass
+
+    return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.get("/billing/debug", response_class=HTMLResponse, include_in_schema=False)
+def billing_debug(request: Request):
+    """Small logged-in debug page showing what Stripe returns for this customer."""
+    email = require_portal_user(request)
+    if not email:
+        return RedirectResponse(url="/login", status_code=303)
+
+    row = get_api_key_row_by_email(email)
+    if not row:
+        return page_shell("Billing Debug", "<h1>No account row found</h1><p><a href='/dashboard'>Back</a></p>")
+
+    stripe_customer_id = row.get("stripe_customer_id")
+    if not stripe_customer_id:
+        return page_shell("Billing Debug", "<h1>No Stripe customer ID found</h1><p><a href='/dashboard'>Back</a></p>")
+
+    try:
+        subscriptions = stripe.Subscription.list(customer=stripe_customer_id, status="all", limit=20)
+        data = [stripe_object_to_dict(item) for item in (getattr(subscriptions, "data", None) or [])]
+        rows = []
+        for sub in data:
+            rows.append(f"""
+            <tr>
+                <td>{escape(sub.get('id'))}</td>
+                <td>{escape(sub.get('status'))}</td>
+                <td>{escape(sub.get('cancel_at_period_end'))}</td>
+                <td>{escape(sub.get('cancel_at'))}</td>
+                <td>{escape(sub.get('current_period_end'))}</td>
+                <td>{escape(stripe_timestamp_to_iso(sub.get('current_period_end') or sub.get('cancel_at')))}</td>
+            </tr>
+            """)
+        table = "".join(rows) or "<tr><td colspan='6'>No subscriptions returned</td></tr>"
+        body = f"""
+        <h1>Billing Debug</h1>
+        <p>Account: {escape(email)}</p>
+        <p>Stripe customer: {escape(stripe_customer_id)}</p>
+        <form method='post' action='/billing/sync'><button type='submit'>Sync Billing Now</button></form>
+        <div class='card' style='margin-top:20px; overflow:auto;'>
+        <table style='width:100%; border-collapse:collapse; color:white;'>
+            <tr><th>ID</th><th>Status</th><th>cancel_at_period_end</th><th>cancel_at</th><th>current_period_end</th><th>decoded end</th></tr>
+            {table}
+        </table>
+        </div>
+        <p><a href='/dashboard'>Back to dashboard</a></p>
+        """
+        return page_shell("Billing Debug", body)
+    except Exception as e:
+        return page_shell("Billing Debug", f"<h1>Stripe debug failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back</a></p>")
+
 @app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
 def pricing_page(request: Request):
     email = require_portal_user(request)
@@ -1382,8 +1450,8 @@ async def stripe_webhook(request: Request):
         status = str(data_object.get("status") or "active").lower()
         stripe_customer_id = data_object.get("customer")
 
-        cancel_at_period_end = bool(data_object.get("cancel_at_period_end"))
-        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end"))
+        cancel_at_period_end = bool(data_object.get("cancel_at_period_end") or data_object.get("cancel_at"))
+        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end") or data_object.get("cancel_at"))
 
         if not email and stripe_customer_id:
             try:
