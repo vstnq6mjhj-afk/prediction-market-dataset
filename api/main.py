@@ -325,6 +325,97 @@ def update_subscription_by_customer(stripe_customer_id: str, subscription_status
     updates = {key: value for key, value in updates.items() if value is not None}
     safe_update_api_keys(updates, "stripe_customer_id", stripe_customer_id)
 
+
+def infer_plan_from_stripe_subscription(subscription) -> str:
+    """Best-effort plan detection for inline Stripe prices."""
+    metadata = subscription.get("metadata") or {}
+    plan = str(metadata.get("plan") or "").lower()
+    if plan in PLAN_CONFIG:
+        return plan
+
+    try:
+        item = (subscription.get("items") or {}).get("data", [])[0]
+        amount = ((item.get("price") or {}).get("unit_amount"))
+        if int(amount or 0) >= 4900:
+            return "professional"
+        if int(amount or 0) >= 1900:
+            return "developer"
+    except Exception:
+        pass
+
+    return "developer"
+
+
+def sync_subscription_from_stripe(email: str, row: dict):
+    """Refresh Supabase billing fields from Stripe when the dashboard loads.
+
+    This catches cases where a webhook was missed or the customer canceled from
+    Stripe Customer Portal before the latest webhook code was deployed.
+    """
+    email = normalize_email(email)
+    stripe_customer_id = str((row or {}).get("stripe_customer_id") or "").strip()
+
+    if not email or not stripe_customer_id or not STRIPE_SECRET_KEY:
+        return
+
+    try:
+        subscriptions = stripe.Subscription.list(
+            customer=stripe_customer_id,
+            status="all",
+            limit=10,
+        )
+    except Exception:
+        return
+
+    if not subscriptions.data:
+        return
+
+    active_statuses = {"active", "trialing", "past_due", "unpaid"}
+    selected = None
+
+    for subscription in subscriptions.data:
+        if str(subscription.get("status") or "").lower() in active_statuses:
+            selected = subscription
+            break
+
+    if selected is None:
+        selected = subscriptions.data[0]
+
+    status = str(selected.get("status") or "free").lower()
+    plan = infer_plan_from_stripe_subscription(selected)
+    cancel_at_period_end = bool(selected.get("cancel_at_period_end"))
+    current_period_end = stripe_timestamp_to_iso(selected.get("current_period_end"))
+
+    if status in {"active", "trialing"}:
+        update_subscription_by_email(
+            email=email,
+            plan=plan,
+            subscription_status="active",
+            stripe_customer_id=stripe_customer_id,
+            cancel_at_period_end=cancel_at_period_end,
+            current_period_end=current_period_end,
+        )
+    elif status in {"past_due", "unpaid"}:
+        update_subscription_by_customer(stripe_customer_id, "past_due")
+        safe_update_api_keys(
+            {
+                "cancel_at_period_end": cancel_at_period_end,
+                "current_period_end": current_period_end,
+            },
+            "stripe_customer_id",
+            stripe_customer_id,
+        )
+    elif status in {"canceled", "incomplete_expired"}:
+        update_subscription_by_customer(stripe_customer_id, "canceled")
+        safe_update_api_keys(
+            {
+                "cancel_at_period_end": False,
+                "current_period_end": None,
+            },
+            "stripe_customer_id",
+            stripe_customer_id,
+        )
+
 def require_active_subscription(account=Depends(verify_api_key)):
     """Allow /v1/account for all valid keys, but require paid subscription for dataset endpoints."""
     result = (
@@ -702,6 +793,10 @@ def dashboard(request: Request):
     row = get_api_key_row_by_email(email)
     if not row:
         row = ensure_api_key_for_user(email=email)
+
+    # Keep billing cancellation state fresh even if a Stripe webhook was missed.
+    sync_subscription_from_stripe(email, row)
+    row = get_api_key_row_by_email(email) or row
 
     requests_today = row.get("requests_today", 0) or 0
     daily_limit = row.get("daily_limit", 100) or 100
@@ -1214,21 +1309,27 @@ async def stripe_webhook(request: Request):
 
     elif event_type == "customer.subscription.updated":
         metadata = data_object.get("metadata") or {}
-        email = metadata.get("email")
-        plan = metadata.get("plan", "developer")
-        status = data_object.get("status", "active")
+        email = normalize_email(metadata.get("email"))
+        plan = metadata.get("plan") or infer_plan_from_stripe_subscription(data_object)
+        status = str(data_object.get("status") or "active").lower()
         stripe_customer_id = data_object.get("customer")
 
-        cancel_at_period_end = bool(data_object.get("cancel_at_period_end", False))
-        current_period_end = data_object.get("current_period_end")
+        cancel_at_period_end = bool(data_object.get("cancel_at_period_end"))
+        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end"))
 
-        current_period_end_iso = None
-        if current_period_end:
-            current_period_end_iso = pd.to_datetime(
-                int(current_period_end),
-                unit="s",
-                utc=True,
-            ).isoformat()
+        if not email and stripe_customer_id:
+            try:
+                existing = (
+                    supabase.table("api_keys")
+                    .select("email")
+                    .eq("stripe_customer_id", stripe_customer_id)
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    email = normalize_email(existing.data[0].get("email"))
+            except Exception:
+                email = ""
 
         if status in {"active", "trialing"} and email:
             update_subscription_by_email(
@@ -1236,38 +1337,38 @@ async def stripe_webhook(request: Request):
                 plan=plan,
                 subscription_status="active",
                 stripe_customer_id=stripe_customer_id,
+                cancel_at_period_end=cancel_at_period_end,
+                current_period_end=current_period_end,
             )
-
-            supabase.table("api_keys").update({
-                "cancel_at_period_end": cancel_at_period_end,
-                "current_period_end": current_period_end_iso,
-            }).eq("email", email).execute()
-
-    elif status in {"past_due", "unpaid"}:
-        update_subscription_by_customer(stripe_customer_id, "past_due")
-
-        supabase.table("api_keys").update({
-            "cancel_at_period_end": cancel_at_period_end,
-            "current_period_end": current_period_end_iso,
-        }).eq("stripe_customer_id", stripe_customer_id).execute()
-
-    elif status in {"canceled", "incomplete_expired"}:
-        update_subscription_by_customer(stripe_customer_id, "canceled")
-
-        supabase.table("api_keys").update({
-            "cancel_at_period_end": False,
-            "current_period_end": current_period_end_iso,
-        }).eq("stripe_customer_id", stripe_customer_id).execute()
+        elif status in {"past_due", "unpaid"}:
+            update_subscription_by_customer(stripe_customer_id, "past_due")
+            safe_update_api_keys(
+                {
+                    "cancel_at_period_end": cancel_at_period_end,
+                    "current_period_end": current_period_end,
+                },
+                "stripe_customer_id",
+                stripe_customer_id,
+            )
+        elif status in {"canceled", "incomplete_expired"}:
+            update_subscription_by_customer(stripe_customer_id, "canceled")
+            safe_update_api_keys(
+                {
+                    "cancel_at_period_end": False,
+                    "current_period_end": None,
+                },
+                "stripe_customer_id",
+                stripe_customer_id,
+            )
 
     elif event_type == "customer.subscription.deleted":
         stripe_customer_id = data_object.get("customer")
-
         update_subscription_by_customer(stripe_customer_id, "canceled")
-
-        supabase.table("api_keys").update({
-            "cancel_at_period_end": False,
-            "current_period_end": None,
-        }).eq("stripe_customer_id", stripe_customer_id).execute()
+        safe_update_api_keys(
+            {"cancel_at_period_end": False, "current_period_end": None},
+            "stripe_customer_id",
+            stripe_customer_id,
+        )
 
     elif event_type == "invoice.payment_failed":
         update_subscription_by_customer(data_object.get("customer"), "past_due")
