@@ -239,6 +239,24 @@ try:
         c4.metric("Latest Snapshot", str(latest_snapshot)[:22])
 
         st.divider()
+        st.subheader("Recent Snapshot Growth")
+        growth = sql_df(
+            conn,
+            f"""
+            SELECT snapshot_time, COUNT(*) AS rows
+            FROM market_snapshots
+            {where_clause}
+            GROUP BY snapshot_time
+            ORDER BY snapshot_time DESC
+            LIMIT 300
+            """,
+        )
+        if not growth.empty:
+            growth["snapshot_time"] = pd.to_datetime(growth["snapshot_time"])
+            growth = growth.sort_values("snapshot_time")
+            fig = px.line(growth, x="snapshot_time", y="rows", markers=True, title="Rows Collected Over Recent Snapshots")
+            st.plotly_chart(fig, use_container_width=True)
+
         st.subheader("Platform Coverage")
         platform_stats = sql_df(
             conn,
@@ -264,24 +282,6 @@ try:
             st.plotly_chart(fig_rows, use_container_width=True)
             fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
             st.plotly_chart(fig_unique, use_container_width=True)
-
-        st.subheader("Recent Snapshot Growth")
-        growth = sql_df(
-            conn,
-            f"""
-            SELECT snapshot_time, COUNT(*) AS rows
-            FROM market_snapshots
-            {where_clause}
-            GROUP BY snapshot_time
-            ORDER BY snapshot_time DESC
-            LIMIT 300
-            """,
-        )
-        if not growth.empty:
-            growth["snapshot_time"] = pd.to_datetime(growth["snapshot_time"])
-            growth = growth.sort_values("snapshot_time")
-            fig = px.line(growth, x="snapshot_time", y="rows", markers=True, title="Rows Collected Over Recent Snapshots")
-            st.plotly_chart(fig, use_container_width=True)
 
     elif page == "Markets":
         st.subheader("Latest Top Volume Markets")

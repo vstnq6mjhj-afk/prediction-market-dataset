@@ -246,11 +246,35 @@ def plan_daily_limit(plan: str) -> int:
     return 100
 
 
+def stripe_timestamp_to_iso(value) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(value)))
+    except Exception:
+        return None
+
+
+def safe_update_api_keys(updates: dict, column: str, value: str):
+    """Update api_keys, falling back if optional billing columns are missing."""
+    try:
+        return supabase.table("api_keys").update(updates).eq(column, value).execute()
+    except Exception:
+        fallback = {
+            key: val
+            for key, val in updates.items()
+            if key not in {"cancel_at_period_end", "current_period_end"}
+        }
+        return supabase.table("api_keys").update(fallback).eq(column, value).execute()
+
+
 def update_subscription_by_email(
     email: str,
     plan: str,
     subscription_status: str,
     stripe_customer_id: Optional[str] = None,
+    cancel_at_period_end: bool = False,
+    current_period_end: Optional[str] = None,
 ):
     email = normalize_email(email)
     plan = str(plan or "free").lower()
@@ -272,12 +296,14 @@ def update_subscription_by_email(
         "plan": plan,
         "subscription_status": stored_status,
         "daily_limit": daily_limit,
+        "cancel_at_period_end": bool(cancel_at_period_end),
+        "current_period_end": current_period_end,
     }
 
     if stripe_customer_id:
         updates["stripe_customer_id"] = stripe_customer_id
 
-    supabase.table("api_keys").update(updates).eq("email", email).execute()
+    safe_update_api_keys(updates, "email", email)
 
 
 def update_subscription_by_customer(stripe_customer_id: str, subscription_status: str):
@@ -286,12 +312,18 @@ def update_subscription_by_customer(stripe_customer_id: str, subscription_status
         return
 
     status = str(subscription_status or "free").lower()
-    updates = {"subscription_status": status}
+    updates = {
+        "subscription_status": status,
+        "cancel_at_period_end": False if status != "active" else None,
+    }
 
     if status != "active":
         updates["daily_limit"] = 100
+        updates["current_period_end"] = None
 
-    supabase.table("api_keys").update(updates).eq("stripe_customer_id", stripe_customer_id).execute()
+    # Remove None values so active updates do not accidentally clear fields.
+    updates = {key: value for key, value in updates.items() if value is not None}
+    safe_update_api_keys(updates, "stripe_customer_id", stripe_customer_id)
 
 def require_active_subscription(account=Depends(verify_api_key)):
     """Allow /v1/account for all valid keys, but require paid subscription for dataset endpoints."""
@@ -677,6 +709,16 @@ def dashboard(request: Request):
     plan = row.get("plan", "free")
     subscription_status = row.get("subscription_status", "free")
     display_plan = plan if str(subscription_status).lower() == "active" else "free"
+
+    cancel_at_period_end = bool(row.get("cancel_at_period_end"))
+    current_period_end = row.get("current_period_end")
+    status_label = str(subscription_status)
+    if str(subscription_status).lower() == "active" and cancel_at_period_end:
+        if current_period_end:
+            status_label = f"active — cancels on {str(current_period_end)[:10]}"
+        else:
+            status_label = "active — cancels at period end"
+
     api_key = row.get("api_key", "")
     explorer_url = DATASET_EXPLORER_URL + "?" + urlencode({"api_key": api_key})
 
@@ -688,22 +730,22 @@ def dashboard(request: Request):
     </div>
     <a href="/logout">Logout</a>
 </div>
-<div class="grid">
-    <div class="card"><div class="label">Current Plan</div><div class="value">{escape(display_plan).upper()}</div><p class="label">Status: {escape(subscription_status)}</p></div>
-    <div class="card"><div class="label">Requests Today</div><div class="value">{requests_today:,} / {daily_limit:,}</div><div class="progress"><div class="bar" style="width:{usage_pct}%"></div></div><p class="label">{usage_pct}% used</p></div>
-    <div class="card"><div class="label">Daily Limit</div><div class="value">{daily_limit:,}</div><p class="label">Upgrade for higher limits.</p></div>
-</div>
 <div class="card" style="margin-top:25px;">
     <div class="label">Your API Key</div>
     <div class="api-key" id="apiKey">{escape(api_key)}</div>
+    <div class="actions">
+        <a class="button" href="/docs">View API Docs</a>
+        <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
+        <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
+        <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
+        <a class="button secondary" href="/pricing">View Plans & Billing</a>
+        <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
+    </div>
 </div>
-<div class="actions">
-    <a class="button" href="/docs">View API Docs</a>
-    <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
-    <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
-    <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
-    <a class="button secondary" href="/pricing">View Plans & Billing</a>
-    <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
+<div class="grid" style="margin-top:25px;">
+    <div class="card"><div class="label">Current Plan</div><div class="value">{escape(display_plan).upper()}</div><p class="label">Status: {escape(status_label)}</p></div>
+    <div class="card"><div class="label">Requests Today</div><div class="value">{requests_today:,} / {daily_limit:,}</div><div class="progress"><div class="bar" style="width:{usage_pct}%"></div></div><p class="label">{usage_pct}% used</p></div>
+    <div class="card"><div class="label">Daily Limit</div><div class="value">{daily_limit:,}</div><p class="label">Upgrade for higher limits.</p></div>
 </div>
 <script>
 function copyApiKey() {{
@@ -1174,12 +1216,17 @@ async def stripe_webhook(request: Request):
         status = data_object.get("status", "active")
         stripe_customer_id = data_object.get("customer")
 
+        cancel_at_period_end = bool(data_object.get("cancel_at_period_end"))
+        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end"))
+
         if status in {"active", "trialing"} and email:
             update_subscription_by_email(
                 email=email,
                 plan=plan,
                 subscription_status="active",
                 stripe_customer_id=stripe_customer_id,
+                cancel_at_period_end=cancel_at_period_end,
+                current_period_end=current_period_end,
             )
         elif status in {"past_due", "unpaid"}:
             update_subscription_by_customer(stripe_customer_id, "past_due")
