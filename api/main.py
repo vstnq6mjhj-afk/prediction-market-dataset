@@ -1219,8 +1219,16 @@ async def stripe_webhook(request: Request):
         status = data_object.get("status", "active")
         stripe_customer_id = data_object.get("customer")
 
-        cancel_at_period_end = bool(data_object.get("cancel_at_period_end"))
-        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end"))
+        cancel_at_period_end = bool(data_object.get("cancel_at_period_end", False))
+        current_period_end = data_object.get("current_period_end")
+
+        current_period_end_iso = None
+        if current_period_end:
+            current_period_end_iso = pd.to_datetime(
+                int(current_period_end),
+                unit="s",
+                utc=True,
+            ).isoformat()
 
         if status in {"active", "trialing"} and email:
             update_subscription_by_email(
@@ -1228,16 +1236,38 @@ async def stripe_webhook(request: Request):
                 plan=plan,
                 subscription_status="active",
                 stripe_customer_id=stripe_customer_id,
-                cancel_at_period_end=cancel_at_period_end,
-                current_period_end=current_period_end,
             )
-        elif status in {"past_due", "unpaid"}:
-            update_subscription_by_customer(stripe_customer_id, "past_due")
-        elif status in {"canceled", "incomplete_expired"}:
-            update_subscription_by_customer(stripe_customer_id, "canceled")
+
+            supabase.table("api_keys").update({
+                "cancel_at_period_end": cancel_at_period_end,
+                "current_period_end": current_period_end_iso,
+            }).eq("email", email).execute()
+
+    elif status in {"past_due", "unpaid"}:
+        update_subscription_by_customer(stripe_customer_id, "past_due")
+
+        supabase.table("api_keys").update({
+            "cancel_at_period_end": cancel_at_period_end,
+            "current_period_end": current_period_end_iso,
+        }).eq("stripe_customer_id", stripe_customer_id).execute()
+
+    elif status in {"canceled", "incomplete_expired"}:
+        update_subscription_by_customer(stripe_customer_id, "canceled")
+
+        supabase.table("api_keys").update({
+            "cancel_at_period_end": False,
+            "current_period_end": current_period_end_iso,
+        }).eq("stripe_customer_id", stripe_customer_id).execute()
 
     elif event_type == "customer.subscription.deleted":
-        update_subscription_by_customer(data_object.get("customer"), "canceled")
+        stripe_customer_id = data_object.get("customer")
+
+        update_subscription_by_customer(stripe_customer_id, "canceled")
+
+        supabase.table("api_keys").update({
+            "cancel_at_period_end": False,
+            "current_period_end": None,
+        }).eq("stripe_customer_id", stripe_customer_id).execute()
 
     elif event_type == "invoice.payment_failed":
         update_subscription_by_customer(data_object.get("customer"), "past_due")
