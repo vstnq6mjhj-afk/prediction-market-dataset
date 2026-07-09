@@ -255,6 +255,31 @@ def stripe_timestamp_to_iso(value) -> Optional[str]:
         return None
 
 
+def stripe_object_to_dict(value):
+    """Convert Stripe objects to plain dicts safely.
+
+    Newer Stripe Python objects can raise AttributeError when code treats them
+    exactly like dictionaries. This helper keeps webhook/dashboard sync stable.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return value.to_dict_recursive()
+    except Exception:
+        try:
+            return dict(value)
+        except Exception:
+            return {}
+
+
+def dict_get(data, key, default=None):
+    if not isinstance(data, dict):
+        data = stripe_object_to_dict(data)
+    return data.get(key, default)
+
+
 def safe_update_api_keys(updates: dict, column: str, value: str):
     """Update api_keys without ever crashing user-facing pages.
 
@@ -338,17 +363,22 @@ def update_subscription_by_customer(stripe_customer_id: str, subscription_status
 
 def infer_plan_from_stripe_subscription(subscription) -> str:
     """Best-effort plan detection for inline Stripe prices."""
-    metadata = subscription.get("metadata") or {}
+    subscription = stripe_object_to_dict(subscription)
+
+    metadata = stripe_object_to_dict(subscription.get("metadata") or {})
     plan = str(metadata.get("plan") or "").lower()
     if plan in PLAN_CONFIG:
         return plan
 
     try:
-        item = (subscription.get("items") or {}).get("data", [])[0]
-        amount = ((item.get("price") or {}).get("unit_amount"))
-        if int(amount or 0) >= 4900:
+        items = stripe_object_to_dict(subscription.get("items") or {})
+        item_data = items.get("data") or []
+        first_item = stripe_object_to_dict(item_data[0]) if item_data else {}
+        price = stripe_object_to_dict(first_item.get("price") or {})
+        amount = int(price.get("unit_amount") or 0)
+        if amount >= 4900:
             return "professional"
-        if int(amount or 0) >= 1900:
+        if amount >= 1900:
             return "developer"
     except Exception:
         pass
@@ -377,19 +407,21 @@ def sync_subscription_from_stripe(email: str, row: dict):
     except Exception:
         return
 
-    if not subscriptions.data:
+    subscription_data = getattr(subscriptions, "data", None) or []
+    if not subscription_data:
         return
 
     active_statuses = {"active", "trialing", "past_due", "unpaid"}
     selected = None
 
-    for subscription in subscriptions.data:
-        if str(subscription.get("status") or "").lower() in active_statuses:
-            selected = subscription
+    for subscription in subscription_data:
+        sub_dict = stripe_object_to_dict(subscription)
+        if str(sub_dict.get("status") or "").lower() in active_statuses:
+            selected = sub_dict
             break
 
     if selected is None:
-        selected = subscriptions.data[0]
+        selected = stripe_object_to_dict(subscription_data[0])
 
     status = str(selected.get("status") or "free").lower()
     plan = infer_plan_from_stripe_subscription(selected)
@@ -1302,7 +1334,7 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid Stripe signature")
 
     event_type = event.get("type")
-    data_object = event.get("data", {}).get("object", {})
+    data_object = stripe_object_to_dict(event.get("data", {}).get("object", {}))
 
     if event_type == "checkout.session.completed":
         metadata = data_object.get("metadata") or {}
