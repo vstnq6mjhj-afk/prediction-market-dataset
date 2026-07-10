@@ -755,6 +755,7 @@ def root():
         <a class="button" href="/signup">Create Account</a>
         <a class="button secondary" href="/login">Login</a>
         <a class="button secondary" href="/docs">View API Docs</a>
+        <a class="button secondary" href="/api-examples">API Examples</a>
     </div>
 </section>
 <section class="grid">
@@ -775,7 +776,8 @@ def root():
     <br><br>
     <a href="/terms">Terms</a> ·
     <a href="/privacy">Privacy</a> ·
-    <a href="/contact">Contact</a>
+    <a href="/contact">Contact</a> ·
+    <a href="/api-examples">API Examples</a>
 </footer>
 """
     return page_shell("Home", body)
@@ -895,6 +897,7 @@ def dashboard(request: Request):
 <div class="card" style="max-width:1060px; margin:0 auto 24px; text-align:center;">
     <div class="actions" style="margin-top:0; justify-content:center; gap:14px;">
         <a class="button" href="/docs">View API Docs</a>
+        <a class="button secondary" href="/api-examples">API Examples</a>
         <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
         <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
         <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
@@ -1256,6 +1259,128 @@ def billing_debug(request: Request):
         return page_shell("Billing Debug", body)
     except Exception as e:
         return page_shell("Billing Debug", f"<h1>Stripe debug failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back</a></p>")
+
+
+
+@app.get("/api-examples", response_class=HTMLResponse, include_in_schema=False)
+def api_examples_page(request: Request):
+    email = require_portal_user(request)
+    if not email:
+        return RedirectResponse(url="/login", status_code=303)
+
+    row = get_api_key_row_by_email(email)
+    if not row:
+        row = ensure_api_key_for_user(email=email)
+
+    api_key = row.get("api_key", "YOUR_API_KEY")
+    base_url = APP_BASE_URL.rstrip("/")
+
+    curl_search = f"""curl -X GET "{base_url}/v1/search?q=bitcoin&limit=5" \\
+  -H "Authorization: Bearer {api_key}""" 
+
+    curl_latest = f"""curl -X GET "{base_url}/v1/latest?platform=polymarket&limit=10" \\
+  -H "Authorization: Bearer {api_key}"""
+
+    python_example = f"""import requests
+
+API_KEY = "{api_key}"
+BASE_URL = "{base_url}"
+
+headers = {{"Authorization": f"Bearer {{API_KEY}}"}}
+params = {{"q": "bitcoin", "limit": 10}}
+
+response = requests.get(f"{{BASE_URL}}/v1/search", headers=headers, params=params)
+response.raise_for_status()
+
+markets = response.json()
+for market in markets:
+    print(market.get("platform"), market.get("title"), market.get("yes_price"))"""
+
+    javascript_example = f"""const API_KEY = "{api_key}";
+const BASE_URL = "{base_url}";
+
+async function searchMarkets() {{
+  const url = `${{BASE_URL}}/v1/search?q=bitcoin&limit=10`;
+
+  const response = await fetch(url, {{
+    headers: {{
+      Authorization: `Bearer ${{API_KEY}}`,
+    }},
+  }});
+
+  if (!response.ok) {{
+    throw new Error(`API error: ${{response.status}}`);
+  }}
+
+  const markets = await response.json();
+  console.log(markets);
+}}
+
+searchMarkets();"""
+
+    r_example = f"""library(httr2)
+library(jsonlite)
+
+api_key <- "{api_key}"
+base_url <- "{base_url}"
+
+req <- request(paste0(base_url, "/v1/search")) |>
+  req_url_query(q = "bitcoin", limit = 10) |>
+  req_headers(Authorization = paste("Bearer", api_key))
+
+resp <- req_perform(req)
+data <- resp_body_json(resp)
+print(data)"""
+
+    body = f"""
+<a href="/dashboard">← Back to Dashboard</a>
+<div style="text-align:center; margin-bottom:38px;">
+    <h1>API Examples</h1>
+    <p>Use your Prediction Market Dataset API key to query live and historical cross-platform prediction market data.</p>
+</div>
+
+<div class="card" style="margin-bottom:24px;">
+    <div class="label">Your API Key</div>
+    <div class="api-key">{escape(api_key)}</div>
+    <p>Use this key in the <strong>Authorization</strong> header as a Bearer token.</p>
+</div>
+
+<div class="grid" style="margin-bottom:28px;">
+    <div class="card"><h2>Search</h2><p>Find markets by keyword across platforms.</p><code>GET /v1/search?q=bitcoin</code></div>
+    <div class="card"><h2>Latest</h2><p>Fetch the latest market snapshot rows.</p><code>GET /v1/latest</code></div>
+    <div class="card"><h2>Movers</h2><p>Find markets with the largest recent price changes.</p><code>GET /v1/movers</code></div>
+</div>
+
+<h2>cURL: search markets</h2>
+<code>{escape(curl_search)}</code>
+
+<h2>cURL: latest Polymarket rows</h2>
+<code>{escape(curl_latest)}</code>
+
+<h2>Python</h2>
+<code>{escape(python_example)}</code>
+
+<h2>JavaScript / Node.js</h2>
+<code>{escape(javascript_example)}</code>
+
+<h2>R</h2>
+<code>{escape(r_example)}</code>
+
+<div class="card" style="margin-top:32px;">
+    <h2>Useful endpoints</h2>
+    <ul>
+        <li><strong>/v1/account</strong> — check plan, subscription status, and remaining request quota.</li>
+        <li><strong>/v1/stats</strong> — dataset size, platforms, markets, and latest snapshot time.</li>
+        <li><strong>/v1/platforms</strong> — platform-level coverage and liquidity summary.</li>
+        <li><strong>/v1/search?q=...</strong> — keyword search over latest markets.</li>
+        <li><strong>/v1/latest</strong> — latest dataset rows, optionally filtered by platform.</li>
+        <li><strong>/v1/market/{{market_id}}</strong> — historical snapshots for a specific market.</li>
+        <li><strong>/v1/movers</strong> — recent market movers based on price changes.</li>
+    </ul>
+    <p>Full interactive docs are available at <a href="/docs">/docs</a>.</p>
+</div>
+"""
+    return page_shell("API Examples", body)
 
 @app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
 def pricing_page(request: Request):
