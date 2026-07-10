@@ -1,53 +1,63 @@
+"""
+Manual DuckDB warehouse backup script.
+
+Use this only when you intentionally want to create a backup.
+Do NOT run this as a background worker inside the live Streamlit service.
+
+Default paths:
+- Source DB: /var/data/warehouse.duckdb
+- Backup dir: /var/data/backups
+"""
+
 import os
 import shutil
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
-BACKUP_DIR = os.getenv("BACKUP_DIR", "/var/data/backups")
-BACKUP_INTERVAL_SECONDS = int(os.getenv("BACKUP_INTERVAL_SECONDS", "86400"))  # 24 hours
+
+DB_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "/var/data/backups"))
 
 
-def backup_once():
-    db_path = Path(DB_PATH)
-    backup_dir = Path(BACKUP_DIR)
+def human_size(num_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(num_bytes)
 
-    if not db_path.exists():
-        print(f"[backup] Database not found: {db_path}", flush=True)
-        return
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024
 
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+def backup_once() -> None:
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found: {DB_PATH}")
 
-    timestamped_backup = backup_dir / f"warehouse_backup_{timestamp}.duckdb"
-    latest_backup = backup_dir / "warehouse_backup_latest.duckdb"
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-    tmp_backup = backup_dir / f".warehouse_backup_{timestamp}.tmp"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamped_backup = BACKUP_DIR / f"warehouse_backup_{timestamp}.duckdb"
+    latest_backup = BACKUP_DIR / "warehouse_backup_latest.duckdb"
+    temp_backup = BACKUP_DIR / f".warehouse_backup_{timestamp}.tmp"
 
-    print(f"[backup] Starting backup: {db_path} -> {timestamped_backup}", flush=True)
+    source_size = DB_PATH.stat().st_size
 
-    shutil.copy2(db_path, tmp_backup)
-    tmp_backup.rename(timestamped_backup)
+    print(f"[backup] Source: {DB_PATH}", flush=True)
+    print(f"[backup] Size: {human_size(source_size)}", flush=True)
+    print(f"[backup] Writing temporary backup: {temp_backup}", flush=True)
 
+    shutil.copy2(DB_PATH, temp_backup)
+
+    print(f"[backup] Finalizing timestamped backup: {timestamped_backup}", flush=True)
+    temp_backup.rename(timestamped_backup)
+
+    print(f"[backup] Updating latest backup: {latest_backup}", flush=True)
     shutil.copy2(timestamped_backup, latest_backup)
 
-    print(f"[backup] Backup complete: {timestamped_backup}", flush=True)
-    print(f"[backup] Latest backup updated: {latest_backup}", flush=True)
-
-
-def main():
-    print("[backup] Backup worker started", flush=True)
-
-    while True:
-        try:
-            backup_once()
-        except Exception as e:
-            print(f"[backup] Backup failed: {e}", flush=True)
-
-        time.sleep(BACKUP_INTERVAL_SECONDS)
+    print("[backup] Complete", flush=True)
+    print(f"[backup] Timestamped: {timestamped_backup}", flush=True)
+    print(f"[backup] Latest: {latest_backup}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    backup_once()
