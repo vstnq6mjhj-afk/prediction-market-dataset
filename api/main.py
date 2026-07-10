@@ -1273,10 +1273,11 @@ def api_examples_page(request: Request):
         row = ensure_api_key_for_user(email=email)
 
     api_key = row.get("api_key", "YOUR_API_KEY")
+    masked_key = api_key[:14] + "..." + api_key[-6:] if len(api_key) > 24 else api_key
     base_url = APP_BASE_URL.rstrip("/")
 
     curl_search = f"""curl -X GET "{base_url}/v1/search?q=bitcoin&limit=5" \\
-  -H "Authorization: Bearer {api_key}""" 
+  -H "Authorization: Bearer {api_key}"""
 
     curl_latest = f"""curl -X GET "{base_url}/v1/latest?platform=polymarket&limit=10" \\
   -H "Authorization: Bearer {api_key}"""
@@ -1286,15 +1287,30 @@ def api_examples_page(request: Request):
 API_KEY = "{api_key}"
 BASE_URL = "{base_url}"
 
-headers = {{"Authorization": f"Bearer {{API_KEY}}"}}
-params = {{"q": "bitcoin", "limit": 10}}
+headers = {{
+    "Authorization": f"Bearer {{API_KEY}}"
+}}
 
-response = requests.get(f"{{BASE_URL}}/v1/search", headers=headers, params=params)
+params = {{
+    "q": "bitcoin",
+    "limit": 10,
+}}
+
+response = requests.get(
+    f"{{BASE_URL}}/v1/search",
+    headers=headers,
+    params=params,
+)
 response.raise_for_status()
 
 markets = response.json()
+
 for market in markets:
-    print(market.get("platform"), market.get("title"), market.get("yes_price"))"""
+    print(
+        market.get("platform"),
+        market.get("title"),
+        market.get("yes_price"),
+    )"""
 
     javascript_example = f"""const API_KEY = "{api_key}";
 const BASE_URL = "{base_url}";
@@ -1332,17 +1348,45 @@ resp <- req_perform(req)
 data <- resp_body_json(resp)
 print(data)"""
 
+    response_preview = """[
+  {
+    "platform": "polymarket",
+    "market_id": "example_market_id",
+    "title": "Example prediction market title",
+    "yes_price": 0.42,
+    "no_price": 0.58,
+    "volume": 125000.0,
+    "liquidity": 34000.0,
+    "snapshot_time": "2026-07-10T10:00:00Z"
+  }
+]"""
+
+    def example_block(block_id: str, title: str, code: str) -> str:
+        return f"""
+<div class="card" style="margin-top:24px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px;">
+        <h2 style="margin:0;">{escape(title)}</h2>
+        <button class="button secondary" type="button" onclick="copyText('{block_id}')">Copy</button>
+    </div>
+    <code id="{block_id}" style="white-space:pre-wrap; line-height:1.55;">{escape(code)}</code>
+</div>"""
+
     body = f"""
 <a href="/dashboard">← Back to Dashboard</a>
 <div style="text-align:center; margin-bottom:38px;">
     <h1>API Examples</h1>
     <p>Use your Prediction Market Dataset API key to query live and historical cross-platform prediction market data.</p>
+    <div class="actions" style="justify-content:center; margin-top:22px;">
+        <a class="button" href="/docs">Open Swagger Docs</a>
+        <a class="button secondary" href="/dashboard">Account Dashboard</a>
+    </div>
 </div>
 
-<div class="card" style="margin-bottom:24px;">
+<div class="card" style="margin-bottom:24px; text-align:center;">
     <div class="label">Your API Key</div>
-    <div class="api-key">{escape(api_key)}</div>
+    <div class="api-key" id="apiKey" style="max-width:720px; margin:15px auto 0;">{escape(masked_key)}</div>
     <p>Use this key in the <strong>Authorization</strong> header as a Bearer token.</p>
+    <button class="button secondary" type="button" onclick="copyApiKey()">Copy Full API Key</button>
 </div>
 
 <div class="grid" style="margin-bottom:28px;">
@@ -1351,20 +1395,20 @@ print(data)"""
     <div class="card"><h2>Movers</h2><p>Find markets with the largest recent price changes.</p><code>GET /v1/movers</code></div>
 </div>
 
-<h2>cURL: search markets</h2>
-<code>{escape(curl_search)}</code>
+{example_block('curlSearchExample', 'cURL: search markets', curl_search)}
+{example_block('curlLatestExample', 'cURL: latest Polymarket rows', curl_latest)}
+{example_block('pythonExample', 'Python', python_example)}
+{example_block('javascriptExample', 'JavaScript / Node.js', javascript_example)}
+{example_block('rExample', 'R', r_example)}
 
-<h2>cURL: latest Polymarket rows</h2>
-<code>{escape(curl_latest)}</code>
-
-<h2>Python</h2>
-<code>{escape(python_example)}</code>
-
-<h2>JavaScript / Node.js</h2>
-<code>{escape(javascript_example)}</code>
-
-<h2>R</h2>
-<code>{escape(r_example)}</code>
+<div class="card" style="margin-top:24px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px;">
+        <h2 style="margin:0;">Example response</h2>
+        <button class="button secondary" type="button" onclick="copyText('responsePreview')">Copy</button>
+    </div>
+    <p>This is the shape of a typical market row. Actual fields vary slightly by platform and endpoint.</p>
+    <code id="responsePreview" style="white-space:pre-wrap; line-height:1.55;">{escape(response_preview)}</code>
+</div>
 
 <div class="card" style="margin-top:32px;">
     <h2>Useful endpoints</h2>
@@ -1379,6 +1423,21 @@ print(data)"""
     </ul>
     <p>Full interactive docs are available at <a href="/docs">/docs</a>.</p>
 </div>
+
+<script>
+const FULL_API_KEY = "{escape(api_key)}";
+
+function copyApiKey() {{
+    navigator.clipboard.writeText(FULL_API_KEY);
+    alert("Full API key copied");
+}}
+
+function copyText(id) {{
+    const text = document.getElementById(id).innerText;
+    navigator.clipboard.writeText(text);
+    alert("Copied");
+}}
+</script>
 """
     return page_shell("API Examples", body)
 
