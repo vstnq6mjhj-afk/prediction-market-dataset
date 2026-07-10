@@ -745,9 +745,59 @@ def stats(account=Depends(require_active_subscription)):
 # =========================
 
 
+
+def compact_count(value) -> str:
+    try:
+        n = int(value or 0)
+    except Exception:
+        return "—"
+
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M+"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K+"
+    return str(n)
+
+
+def homepage_dataset_stats():
+    """Small public homepage stats. Never allow homepage to fail if DuckDB is busy."""
+    fallback = {
+        "snapshots": "5M+",
+        "markets": "500K+",
+        "platforms": "4",
+        "latest_snapshot": "Live dataset",
+    }
+
+    try:
+        row = query_db("""
+            SELECT
+                COUNT(*) AS snapshots,
+                COUNT(DISTINCT platform || ':' || market_id) AS markets,
+                COUNT(DISTINCT platform) AS platforms,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM market_snapshots
+        """)[0]
+
+        latest = row.get("latest_snapshot")
+        latest_label = "Live dataset"
+        if latest:
+            latest_label = str(latest)[:19].replace("T", " ") + " UTC"
+
+        return {
+            "snapshots": compact_count(row.get("snapshots")),
+            "markets": compact_count(row.get("markets")),
+            "platforms": str(row.get("platforms") or "4"),
+            "latest_snapshot": latest_label,
+        }
+    except Exception:
+        return fallback
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
-    body = """
+    stats = homepage_dataset_stats()
+
+    body = f"""
 <section style="text-align:center; padding:70px 0 55px;">
     <p class="label" style="font-size:16px;">Prediction market data infrastructure</p>
     <h1>Prediction Market Dataset</h1>
@@ -761,23 +811,34 @@ def root():
         <a class="button secondary" href="/pricing">View Pricing</a>
         <a class="button secondary" href="/api-examples">API Examples</a>
         <a class="button secondary" href="/docs">API Docs</a>
+        <a class="button secondary" href="/contact">Contact</a>
     </div>
 </section>
 
 <section class="grid">
     <div class="card">
-        <h2>5M+</h2>
+        <h2>{escape(stats["snapshots"])}</h2>
         <p>Market snapshots collected across supported prediction market platforms.</p>
     </div>
     <div class="card">
-        <h2>500K+</h2>
+        <h2>{escape(stats["markets"])}</h2>
         <p>Unique prediction markets normalized into one queryable dataset.</p>
     </div>
     <div class="card">
-        <h2>4</h2>
+        <h2>{escape(stats["platforms"])}</h2>
         <p>Supported platforms: Polymarket, Kalshi, Manifold, and PredictIt.</p>
     </div>
 </section>
+
+<div class="card" style="margin-top:24px; text-align:center; border-color:#38bdf8;">
+    <h2>Dataset freshness</h2>
+    <p style="font-size:18px; margin:0;">
+        Latest warehouse snapshot: <strong>{escape(stats["latest_snapshot"])}</strong>
+    </p>
+    <p class="label" style="margin-top:10px;">
+        The dataset is updated continuously by the collection scheduler.
+    </p>
+</div>
 
 <h2>Built for developers, researchers, and data teams</h2>
 <section class="grid">
@@ -851,6 +912,52 @@ def root():
         <div class="price">Custom</div>
         <p>For companies, funds, universities, and teams needing custom access or exports.</p>
         <a class="button secondary" href="/contact">Contact Sales</a>
+    </div>
+</section>
+
+<h2>FAQ</h2>
+<section class="grid">
+    <div class="card">
+        <h3>What is Prediction Market Dataset?</h3>
+        <p>
+            It is a unified data platform for historical and live prediction market data,
+            combining supported platforms into one API and explorer.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Who is it for?</h3>
+        <p>
+            Researchers, developers, quantitative analysts, universities, funds,
+            data teams, and anyone building with prediction market data.
+        </p>
+    </div>
+    <div class="card">
+        <h3>What platforms are covered?</h3>
+        <p>
+            The current warehouse covers Polymarket, Kalshi, Manifold, and PredictIt.
+            Coverage will expand over time.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Do I get API access?</h3>
+        <p>
+            Yes. Paid plans include an API key, customer dashboard, dataset explorer,
+            API examples, usage tracking, and protected REST endpoints.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Can I export data?</h3>
+        <p>
+            The Dataset Explorer includes export workflows. Enterprise users can request
+            custom exports, bulk delivery, or commercial licensing.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Is this trading or betting advice?</h3>
+        <p>
+            No. This is a data access product. It does not provide financial,
+            investment, betting, or trading advice.
+        </p>
     </div>
 </section>
 
