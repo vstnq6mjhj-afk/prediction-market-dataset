@@ -748,36 +748,129 @@ def stats(account=Depends(require_active_subscription)):
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
     body = """
-<section style="text-align:center; padding:60px 0;">
-    <h1>Prediction Market Dataset API</h1>
-    <p>Unified historical and live prediction market data from Polymarket, Kalshi, Manifold, and PredictIt.</p>
+<section style="text-align:center; padding:70px 0 55px;">
+    <p class="label" style="font-size:16px;">Prediction market data infrastructure</p>
+    <h1>Prediction Market Dataset</h1>
+    <p style="font-size:20px; max-width:850px; margin:0 auto;">
+        Unified historical and live prediction market data from Polymarket, Kalshi,
+        Manifold, and PredictIt — delivered through a REST API, customer dashboard,
+        and interactive dataset explorer.
+    </p>
     <div class="actions" style="justify-content:center;">
         <a class="button" href="/signup">Create Account</a>
-        <a class="button secondary" href="/login">Login</a>
-        <a class="button secondary" href="/docs">View API Docs</a>
+        <a class="button secondary" href="/pricing">View Pricing</a>
         <a class="button secondary" href="/api-examples">API Examples</a>
+        <a class="button secondary" href="/docs">API Docs</a>
     </div>
 </section>
+
 <section class="grid">
-    <div class="card"><h2>4.7M+</h2><p>Market snapshots collected</p></div>
-    <div class="card"><h2>470K+</h2><p>Unique prediction markets</p></div>
-    <div class="card"><h2>4</h2><p>Supported platforms</p></div>
+    <div class="card">
+        <h2>5M+</h2>
+        <p>Market snapshots collected across supported prediction market platforms.</p>
+    </div>
+    <div class="card">
+        <h2>500K+</h2>
+        <p>Unique prediction markets normalized into one queryable dataset.</p>
+    </div>
+    <div class="card">
+        <h2>4</h2>
+        <p>Supported platforms: Polymarket, Kalshi, Manifold, and PredictIt.</p>
+    </div>
 </section>
+
 <h2>Built for developers, researchers, and data teams</h2>
 <section class="grid">
-    <div class="card"><h3>Unified API</h3><p>Query multiple prediction market platforms through one normalized API.</p></div>
-    <div class="card"><h3>Historical Data</h3><p>Access market history, snapshots, prices, volume, and liquidity.</p></div>
-    <div class="card"><h3>Dataset Explorer</h3><p>Search, filter, inspect, and export prediction market data.</p></div>
+    <div class="card">
+        <h3>Unified REST API</h3>
+        <p>
+            Query market search, latest snapshots, platform coverage, market history,
+            categories, movers, and dataset stats through one API.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Historical Market Data</h3>
+        <p>
+            Access normalized market snapshots including prices, volume, liquidity,
+            platform, status, category, timestamps, and market identifiers.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Dataset Explorer</h3>
+        <p>
+            Browse markets, inspect market history, compare platforms, review movers,
+            and export data from the interactive explorer.
+        </p>
+    </div>
 </section>
-<h2>Example Request</h2>
-<code>GET /v1/search?q=bitcoin<br>Authorization: Bearer YOUR_API_KEY</code>
+
+<h2>What you can build</h2>
+<section class="grid">
+    <div class="card">
+        <h3>Research workflows</h3>
+        <p>
+            Study market behavior, information aggregation, probability movement,
+            liquidity, and cross-platform market coverage.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Data applications</h3>
+        <p>
+            Build dashboards, internal tools, models, alerts, data pipelines,
+            and market intelligence products on top of the API.
+        </p>
+    </div>
+    <div class="card">
+        <h3>Cross-platform analysis</h3>
+        <p>
+            Compare similar markets across platforms and inspect differences in
+            prices, volume, liquidity, and market availability.
+        </p>
+    </div>
+</section>
+
+<h2>Example API request</h2>
+<code>GET /v1/search?q=bitcoin&amp;limit=5<br>Authorization: Bearer YOUR_API_KEY</code>
+
+<h2>Plans</h2>
+<section class="grid">
+    <div class="card">
+        <h3>Developer</h3>
+        <div class="price">£19/mo</div>
+        <p>For individual developers, testing, prototypes, and small research projects.</p>
+        <a class="button" href="/pricing">View Developer Plan</a>
+    </div>
+    <div class="card" style="border-color:#38bdf8;">
+        <h3>Professional</h3>
+        <div class="price">£49/mo</div>
+        <p>For serious users, researchers, data teams, and production applications.</p>
+        <a class="button" href="/pricing">View Professional Plan</a>
+    </div>
+    <div class="card">
+        <h3>Enterprise</h3>
+        <div class="price">Custom</div>
+        <p>For companies, funds, universities, and teams needing custom access or exports.</p>
+        <a class="button secondary" href="/contact">Contact Sales</a>
+    </div>
+</section>
+
+<div class="card" style="margin-top:35px;">
+    <h2>Important note</h2>
+    <p>
+        Prediction Market Dataset is a data access product. It does not provide financial,
+        investment, betting, or trading advice. Customers are responsible for their own
+        analysis and use of the data.
+    </p>
+</div>
+
 <footer>
-    Prediction Market Dataset API · Live cross-platform market data
+    Prediction Market Dataset · Unified prediction market data infrastructure
     <br><br>
+    <a href="/api-examples">API Examples</a> ·
+    <a href="/docs">API Docs</a> ·
     <a href="/terms">Terms</a> ·
     <a href="/privacy">Privacy</a> ·
-    <a href="/contact">Contact</a> ·
-    <a href="/api-examples">API Examples</a>
+    <a href="/contact">Contact</a>
 </footer>
 """
     return page_shell("Home", body)
