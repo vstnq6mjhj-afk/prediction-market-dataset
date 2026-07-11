@@ -568,15 +568,16 @@ def render_movers() -> None:
 
 def render_matcher() -> None:
     st.title("Market Matcher")
-    st.caption("Compare likely equivalent live prediction markets across supported platform pairs.")
+    st.caption("Compare likely equivalent live prediction markets across supported platform pairs. Weak matches are filtered out by shared-keyword and score rules.")
     back_to_menu()
 
     conn = open_db()
     try:
         st.sidebar.subheader("Matcher Filters")
-        min_match_score = st.sidebar.slider("Minimum match score", 0.10, 1.00, 0.25, 0.05)
+        min_match_score = st.sidebar.slider("Minimum match score", 0.30, 1.00, 0.60, 0.05)
+        min_shared_terms = st.sidebar.slider("Minimum shared keywords", 1, 5, 2, 1)
         min_spread = st.sidebar.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
-        max_per_platform = st.sidebar.slider("Markets per platform", 20, 100, 50, 10)
+        max_per_platform = st.sidebar.slider("Markets per platform", 20, 80, 40, 10)
         keyword_focus = st.sidebar.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup")
 
         matcher_filter = ""
@@ -637,11 +638,21 @@ def render_matcher() -> None:
                 token_score = jaccard(a.get("tokens", set()), b.get("tokens", set()))
                 overlap_terms = sorted(a.get("tokens", set()) & b.get("tokens", set()))
 
-                match_score = (0.60 * token_score) + (0.40 * title_score)
-                if len(overlap_terms) >= 2:
-                    match_score += 0.10
+                # Stricter matching:
+                # - Require actual shared keywords so broad political/event words do not create weak matches.
+                # - Weight shared-token overlap more than fuzzy sentence similarity.
+                # - Keep a small boost for multiple shared keywords.
+                if len(overlap_terms) < min_shared_terms:
+                    continue
+
+                if token_score < 0.20 and title_score < 0.72:
+                    continue
+
+                match_score = (0.75 * token_score) + (0.25 * title_score)
                 if len(overlap_terms) >= 3:
-                    match_score += 0.10
+                    match_score += 0.08
+                if len(overlap_terms) >= 4:
+                    match_score += 0.07
                 match_score = min(match_score, 1.0)
 
                 if match_score < min_match_score:
@@ -672,7 +683,7 @@ def render_matcher() -> None:
                 })
 
         if not matches:
-            st.info("No matches found. Try lowering the match score, lowering price difference, or using a focused keyword.")
+            st.info("No strong matches found. Try lowering the match score, lowering shared keywords, or using a focused keyword.")
             return
 
         matches = sorted(matches, key=lambda x: (x["match_score"], x["difference"]), reverse=True)[:80]
@@ -786,9 +797,7 @@ def render_market_detail() -> None:
         selected_platform_detail = selected_row["platform"]
         selected_market_id = selected_row["market_id"]
 
-        if not st.button("Load Market Detail", type="primary"):
-            st.info("Select a market, then click Load Market Detail.")
-            return
+        st.info("Market detail loads automatically when you choose a market.")
 
         history = sql_df(
             conn,
@@ -808,7 +817,7 @@ def render_market_detail() -> None:
             WHERE platform = ?
               AND market_id = ?
             ORDER BY snapshot_time DESC
-            LIMIT 250
+            LIMIT 200
             """,
             [selected_platform_detail, selected_market_id],
         )
