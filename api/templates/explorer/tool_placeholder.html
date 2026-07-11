@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact">
+    <p class="eyebrow">Dataset tool</p>
+    <h1>{{ tool.name }}</h1>
+    <p class="hero-copy">{{ tool.description }}</p>
+</section>
+
+<section class="info-panel">
+    <h2>This tool is ready for migration</h2>
+    <p>
+        The page route is working inside the main website. The next step is to
+        connect this page to a lightweight FastAPI data endpoint with server-side
+        pagination, filtering, and sorting.
+    </p>
+</section>
+{% endblock %}

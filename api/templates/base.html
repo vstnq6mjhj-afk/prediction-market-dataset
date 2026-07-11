@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }} | Prediction Market Dataset</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/explorer.css') }}">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="site-header">
+            <a class="brand" href="/">Prediction Market Dataset</a>
+            <nav class="top-nav">
+                <a href="/dashboard">Customer Dashboard</a>
+                <a href="/explorer">Dataset Tools</a>
+                <a href="/docs">API Docs</a>
+                <a href="/pricing">Pricing</a>
+            </nav>
+        </header>
+
+        <main class="page-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>

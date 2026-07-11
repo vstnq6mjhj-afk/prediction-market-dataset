@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+<section class="info-panel">
+    <h1>Tool not found</h1>
+    <p>No dataset tool exists at <code>{{ tool_slug }}</code>.</p>
+</section>
+{% endblock %}

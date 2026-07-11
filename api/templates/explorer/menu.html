@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+    <p class="eyebrow">Prediction market data workspace</p>
+    <h1>Dataset Explorer</h1>
+    <p class="hero-copy">
+        Choose the dataset workflow you need. Each tool loads independently,
+        so the website only requests the data required for that page.
+    </p>
+</section>
+
+<section class="tool-grid">
+    {% for tool in tools %}
+    <article class="tool-card">
+        <div class="tool-card-top">
+            <h2>{{ tool.name }}</h2>
+            <span class="status-badge">{{ tool.status }}</span>
+        </div>
+        <p>{{ tool.description }}</p>
+        <a class="button" href="/explorer/{{ tool.slug }}">Open {{ tool.name }}</a>
+    </article>
+    {% endfor %}
+</section>
+
+<section class="info-panel">
+    <h2>One account, one dataset, one scheduler</h2>
+    <p>
+        These tools will run inside the main FastAPI website and query small,
+        paginated responses from the central warehouse. Streamlit is no longer
+        required for the production explorer.
+    </p>
+</section>
+{% endblock %}

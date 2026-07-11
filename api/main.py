@@ -15,11 +15,13 @@ import pandas as pd
 import stripe
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.auth import verify_api_key
 from api.keygen import generate_api_key
 from api.supabase_client import supabase
 from api.usage import log_api_request
+from api.routes.explorer import router as explorer_router
 
 # =========================
 # Configuration
@@ -67,6 +69,13 @@ app = FastAPI(
         "historical market data, movers, categories, platforms, and dataset stats."
     ),
 )
+
+app.mount(
+    "/static",
+    StaticFiles(directory="api/static"),
+    name="static",
+)
+app.include_router(explorer_router)
 
 # =========================
 # Shared helpers
@@ -1085,7 +1094,7 @@ def dashboard(request: Request):
             status_label = "active — cancels at period end"
 
     api_key = row.get("api_key", "")
-    explorer_url = DATASET_EXPLORER_URL + "?" + urlencode({"api_key": api_key})
+    explorer_url = "/explorer"
 
     body = f"""
 <div style="text-align:center; position:relative; margin-bottom:30px;">
