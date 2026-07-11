@@ -2,6 +2,8 @@ import csv
 import io
 import math
 import os
+import re
+from difflib import SequenceMatcher
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -50,7 +52,7 @@ TOOLS = [
         "name": "Market Matcher",
         "slug": "matcher",
         "description": "Compare likely equivalent markets across supported platforms.",
-        "status": "Planned",
+        "status": "Live",
     },
     {
         "name": "Market Detail",
@@ -765,6 +767,228 @@ def _market_sparkline_points(
 
     return " ".join(points)
 
+
+MATCH_STOPWORDS = {
+    "will", "would", "the", "a", "an", "in", "on", "for", "of", "to", "with",
+    "and", "or", "who", "what", "when", "where", "which", "market", "markets",
+    "prediction", "contract", "event", "yes", "no", "win", "wins", "winner",
+    "before", "after", "during", "by", "from", "at", "be", "is", "are",
+}
+
+
+def _normalize_match_title(value: Any) -> str:
+    text = str(value or "").lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    words = [
+        word for word in text.split()
+        if len(word) >= 3 and word not in MATCH_STOPWORDS
+    ]
+    return " ".join(words[:18])
+
+
+def _match_tokens(value: Any) -> set:
+    return set(_normalize_match_title(value).split())
+
+
+def _jaccard(left: set, right: set) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _matcher_candidates(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    platform: str,
+    keyword: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    latest_snapshot = _latest_snapshot(connection)
+    conditions = [
+        "snapshot_time = ?",
+        "LOWER(platform) = ?",
+        "title IS NOT NULL",
+        "yes_price IS NOT NULL",
+    ]
+    params: List[Any] = [latest_snapshot, platform.lower()]
+
+    if keyword.strip():
+        conditions.append("LOWER(title) LIKE ?")
+        params.append(f"%{keyword.strip().lower()}%")
+
+    cursor = connection.execute(
+        f"""
+        SELECT
+            platform,
+            market_id,
+            title,
+            yes_price,
+            no_price,
+            volume,
+            liquidity,
+            raw_url,
+            snapshot_time
+        FROM market_snapshots
+        WHERE {" AND ".join(conditions)}
+        ORDER BY
+            COALESCE(volume, 0) DESC,
+            COALESCE(liquidity, 0) DESC,
+            title ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    )
+    return _rows_as_dicts(cursor)
+
+
+def _match_markets(
+    left_rows: Sequence[Dict[str, Any]],
+    right_rows: Sequence[Dict[str, Any]],
+    *,
+    minimum_score: float,
+    minimum_shared_terms: int,
+    minimum_price_difference: float,
+    result_limit: int,
+) -> List[Dict[str, Any]]:
+    prepared_left = [
+        {
+            **row,
+            "_normalized": _normalize_match_title(row.get("title")),
+            "_tokens": _match_tokens(row.get("title")),
+        }
+        for row in left_rows
+    ]
+    prepared_right = [
+        {
+            **row,
+            "_normalized": _normalize_match_title(row.get("title")),
+            "_tokens": _match_tokens(row.get("title")),
+        }
+        for row in right_rows
+    ]
+
+    matches: List[Dict[str, Any]] = []
+
+    for left in prepared_left:
+        for right in prepared_right:
+            shared_terms = sorted(left["_tokens"] & right["_tokens"])
+            if len(shared_terms) < minimum_shared_terms:
+                continue
+
+            token_score = _jaccard(left["_tokens"], right["_tokens"])
+            sentence_score = SequenceMatcher(
+                None,
+                left["_normalized"],
+                right["_normalized"],
+            ).ratio()
+
+            if token_score < 0.18 and sentence_score < 0.72:
+                continue
+
+            score = (0.74 * token_score) + (0.26 * sentence_score)
+            if len(shared_terms) >= 3:
+                score += 0.08
+            if len(shared_terms) >= 4:
+                score += 0.06
+            score = min(score, 1.0)
+
+            if score < minimum_score:
+                continue
+
+            try:
+                left_price = float(left.get("yes_price"))
+                right_price = float(right.get("yes_price"))
+            except (TypeError, ValueError):
+                continue
+
+            price_difference = abs(left_price - right_price)
+            if price_difference < minimum_price_difference:
+                continue
+
+            matches.append(
+                {
+                    "platform_a": left.get("platform"),
+                    "market_id_a": left.get("market_id"),
+                    "title_a": left.get("title"),
+                    "yes_a": left_price,
+                    "volume_a": left.get("volume"),
+                    "url_a": left.get("raw_url"),
+                    "platform_b": right.get("platform"),
+                    "market_id_b": right.get("market_id"),
+                    "title_b": right.get("title"),
+                    "yes_b": right_price,
+                    "volume_b": right.get("volume"),
+                    "url_b": right.get("raw_url"),
+                    "score": score,
+                    "price_difference": price_difference,
+                    "shared_terms": shared_terms,
+                }
+            )
+
+    matches.sort(
+        key=lambda item: (
+            item["score"],
+            item["price_difference"],
+            max(
+                float(item.get("volume_a") or 0),
+                float(item.get("volume_b") or 0),
+            ),
+        ),
+        reverse=True,
+    )
+    return matches[:result_limit]
+
+
+def _decorate_match_rows(
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        score = float(row.get("score") or 0)
+        output.append(
+            {
+                **row,
+                "platform_a_display": str(row.get("platform_a") or "Unknown").title(),
+                "platform_b_display": str(row.get("platform_b") or "Unknown").title(),
+                "yes_a_display": _display_price(row.get("yes_a")),
+                "yes_b_display": _display_price(row.get("yes_b")),
+                "volume_a_display": _display_number(row.get("volume_a")),
+                "volume_b_display": _display_number(row.get("volume_b")),
+                "price_difference_display": (
+                    f"{float(row.get('price_difference') or 0):.1%}"
+                ),
+                "score_display": f"{score:.0%}",
+                "score_width": round(score * 100, 1),
+                "shared_terms_display": ", ".join(row.get("shared_terms") or []),
+            }
+        )
+    return output
+
+
+def _matcher_export_url(
+    *,
+    platform_a: str,
+    platform_b: str,
+    keyword: str,
+    minimum_score: float,
+    minimum_shared_terms: int,
+    minimum_price_difference: float,
+    markets_per_platform: int,
+    result_limit: int,
+) -> str:
+    return "/explorer/matcher/export?" + urlencode(
+        {
+            "platform_a": platform_a,
+            "platform_b": platform_b,
+            "keyword": keyword,
+            "minimum_score": minimum_score,
+            "minimum_shared_terms": minimum_shared_terms,
+            "minimum_price_difference": minimum_price_difference,
+            "markets_per_platform": markets_per_platform,
+            "result_limit": result_limit,
+        }
+    )
+
 def _display_number(value: Any) -> str:
     if value is None:
         return "—"
@@ -1276,6 +1500,176 @@ def explorer_market_detail(
                 "platform": platform,
                 "market_id": market_id,
             },
+        },
+    )
+
+
+@router.get("/matcher")
+def explorer_matcher(
+    request: Request,
+    platform_a: str = Query(default="", max_length=50),
+    platform_b: str = Query(default="", max_length=50),
+    keyword: str = Query(default="", max_length=100),
+    minimum_score: float = Query(default=0.58, ge=0.20, le=1.0),
+    minimum_shared_terms: int = Query(default=2, ge=1, le=6),
+    minimum_price_difference: float = Query(default=0.0, ge=0.0, le=1.0),
+    markets_per_platform: int = Query(default=35, ge=10, le=60),
+    result_limit: int = Query(default=40, ge=10, le=100),
+):
+    error: Optional[str] = None
+    platforms: List[str] = []
+    rows: List[Dict[str, Any]] = []
+    latest_snapshot: Optional[Any] = None
+    candidate_count_a = 0
+    candidate_count_b = 0
+
+    try:
+        with _connect() as connection:
+            latest_snapshot = _latest_snapshot(connection)
+            platforms = _platforms(connection, latest_snapshot)
+
+            if not platform_a and platforms:
+                platform_a = platforms[0]
+            if not platform_b and len(platforms) > 1:
+                platform_b = platforms[1]
+
+            if platform_a and platform_b and platform_a.lower() != platform_b.lower():
+                left_rows = _matcher_candidates(
+                    connection,
+                    platform=platform_a,
+                    keyword=keyword,
+                    limit=markets_per_platform,
+                )
+                right_rows = _matcher_candidates(
+                    connection,
+                    platform=platform_b,
+                    keyword=keyword,
+                    limit=markets_per_platform,
+                )
+                candidate_count_a = len(left_rows)
+                candidate_count_b = len(right_rows)
+                rows = _decorate_match_rows(
+                    _match_markets(
+                        left_rows,
+                        right_rows,
+                        minimum_score=minimum_score,
+                        minimum_shared_terms=minimum_shared_terms,
+                        minimum_price_difference=minimum_price_difference,
+                        result_limit=result_limit,
+                    )
+                )
+    except Exception as exc:
+        error = str(exc)
+
+    same_platform = bool(
+        platform_a
+        and platform_b
+        and platform_a.lower() == platform_b.lower()
+    )
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/matcher.html",
+        context={
+            "page_title": "Market Matcher",
+            "platforms": platforms,
+            "rows": rows,
+            "latest_snapshot": _display_datetime(latest_snapshot),
+            "candidate_count_a": candidate_count_a,
+            "candidate_count_b": candidate_count_b,
+            "same_platform": same_platform,
+            "error": error,
+            "filters": {
+                "platform_a": platform_a,
+                "platform_b": platform_b,
+                "keyword": keyword,
+                "minimum_score": minimum_score,
+                "minimum_shared_terms": minimum_shared_terms,
+                "minimum_price_difference": minimum_price_difference,
+                "markets_per_platform": markets_per_platform,
+                "result_limit": result_limit,
+            },
+            "export_url": _matcher_export_url(
+                platform_a=platform_a,
+                platform_b=platform_b,
+                keyword=keyword,
+                minimum_score=minimum_score,
+                minimum_shared_terms=minimum_shared_terms,
+                minimum_price_difference=minimum_price_difference,
+                markets_per_platform=markets_per_platform,
+                result_limit=result_limit,
+            ),
+        },
+    )
+
+
+@router.get("/matcher/export")
+def export_matcher(
+    platform_a: str = Query(..., max_length=50),
+    platform_b: str = Query(..., max_length=50),
+    keyword: str = Query(default="", max_length=100),
+    minimum_score: float = Query(default=0.58, ge=0.20, le=1.0),
+    minimum_shared_terms: int = Query(default=2, ge=1, le=6),
+    minimum_price_difference: float = Query(default=0.0, ge=0.0, le=1.0),
+    markets_per_platform: int = Query(default=35, ge=10, le=60),
+    result_limit: int = Query(default=100, ge=10, le=250),
+):
+    with _connect() as connection:
+        left_rows = _matcher_candidates(
+            connection,
+            platform=platform_a,
+            keyword=keyword,
+            limit=markets_per_platform,
+        )
+        right_rows = _matcher_candidates(
+            connection,
+            platform=platform_b,
+            keyword=keyword,
+            limit=markets_per_platform,
+        )
+        rows = _match_markets(
+            left_rows,
+            right_rows,
+            minimum_score=minimum_score,
+            minimum_shared_terms=minimum_shared_terms,
+            minimum_price_difference=minimum_price_difference,
+            result_limit=result_limit,
+        )
+
+    buffer = io.StringIO()
+    fieldnames = [
+        "platform_a",
+        "market_id_a",
+        "title_a",
+        "yes_a",
+        "volume_a",
+        "platform_b",
+        "market_id_b",
+        "title_b",
+        "yes_b",
+        "volume_b",
+        "score",
+        "price_difference",
+        "shared_terms",
+        "url_a",
+        "url_b",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        csv_row = dict(row)
+        csv_row["shared_terms"] = ", ".join(row.get("shared_terms") or [])
+        writer.writerow(
+            {key: _safe_csv_value(csv_row.get(key)) for key in fieldnames}
+        )
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="prediction_market_matches.csv"'
+            )
         },
     )
 
