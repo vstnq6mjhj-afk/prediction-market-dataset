@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact">
+    <p class="eyebrow">Cross-platform coverage</p>
+    <h1>Platforms</h1>
+    <p class="hero-copy">
+        Compare historical warehouse coverage with the latest snapshot.
+        This page runs one grouped summary query and never loads raw market history.
+    </p>
+</section>
+
+{% if error %}
+<section class="error-panel">
+    <strong>Platform query failed.</strong>
+    <p>{{ error }}</p>
+</section>
+{% endif %}
+
+<section class="metric-grid platform-metrics">
+    <article class="metric-card">
+        <span>Platforms</span>
+        <strong>{{ platform_count }}</strong>
+    </article>
+    <article class="metric-card metric-wide">
+        <span>Latest snapshot</span>
+        <strong class="metric-date">{{ latest_snapshot }}</strong>
+    </article>
+</section>
+
+<section class="platform-page-grid">
+    {% for row in rows %}
+    <article class="platform-detail-card">
+        <div class="platform-detail-heading">
+            <div>
+                <p class="eyebrow">Prediction market platform</p>
+                <h2>{{ row.platform_display }}</h2>
+            </div>
+            <strong>{{ row.total_rows_display }} rows</strong>
+        </div>
+
+        <div class="coverage-track">
+            <div class="coverage-fill" style="width: {{ row.coverage_width }}%"></div>
+        </div>
+
+        <div class="platform-stat-grid">
+            <div>
+                <span>Historical markets</span>
+                <strong>{{ row.historical_markets_display }}</strong>
+            </div>
+            <div>
+                <span>Latest markets</span>
+                <strong>{{ row.latest_markets_display }}</strong>
+            </div>
+            <div>
+                <span>Latest rows</span>
+                <strong>{{ row.latest_rows_display }}</strong>
+            </div>
+            <div>
+                <span>Latest avg volume</span>
+                <strong>{{ row.latest_avg_volume_display }}</strong>
+            </div>
+            <div>
+                <span>Latest avg liquidity</span>
+                <strong>{{ row.latest_avg_liquidity_display }}</strong>
+            </div>
+            <div>
+                <span>First snapshot</span>
+                <strong class="small-value">{{ row.first_snapshot_display }}</strong>
+            </div>
+        </div>
+
+        <div class="quality-grid">
+            <div>
+                <div class="quality-heading">
+                    <span>Price coverage</span>
+                    <strong>{{ row.price_coverage }}%</strong>
+                </div>
+                <div class="quality-track">
+                    <div class="quality-fill" style="width: {{ row.price_coverage }}%"></div>
+                </div>
+            </div>
+
+            <div>
+                <div class="quality-heading">
+                    <span>Volume coverage</span>
+                    <strong>{{ row.volume_coverage }}%</strong>
+                </div>
+                <div class="quality-track">
+                    <div class="quality-fill" style="width: {{ row.volume_coverage }}%"></div>
+                </div>
+            </div>
+
+            <div>
+                <div class="quality-heading">
+                    <span>Liquidity coverage</span>
+                    <strong>{{ row.liquidity_coverage }}%</strong>
+                </div>
+                <div class="quality-track">
+                    <div class="quality-fill" style="width: {{ row.liquidity_coverage }}%"></div>
+                </div>
+            </div>
+        </div>
+
+        <footer class="platform-card-footer">
+            <span>Latest data</span>
+            <strong>{{ row.latest_snapshot_display }}</strong>
+        </footer>
+    </article>
+    {% endfor %}
+</section>
+
+{% if not rows and not error %}
+<p class="empty-state">No platform data is available.</p>
+{% endif %}
+{% endblock %}

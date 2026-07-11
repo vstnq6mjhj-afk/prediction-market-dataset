@@ -38,7 +38,7 @@ TOOLS = [
         "name": "Platforms",
         "slug": "platforms",
         "description": "Compare platform coverage, market counts, volume, liquidity, and freshness.",
-        "status": "Planned",
+        "status": "Live",
     },
     {
         "name": "Movers",
@@ -273,6 +273,101 @@ def _overview_platforms(
             }
         )
     return decorated
+
+
+def _platform_comparison(
+    connection: duckdb.DuckDBPyConnection,
+) -> List[Dict[str, Any]]:
+    latest_snapshot = _latest_snapshot(connection)
+
+    cursor = connection.execute(
+        """
+        WITH historical AS (
+            SELECT
+                platform,
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT market_id) AS historical_markets,
+                MIN(snapshot_time) AS first_snapshot,
+                MAX(snapshot_time) AS latest_snapshot,
+                AVG(volume) AS historical_avg_volume,
+                AVG(liquidity) AS historical_avg_liquidity
+            FROM market_snapshots
+            GROUP BY platform
+        ),
+        latest AS (
+            SELECT
+                platform,
+                COUNT(*) AS latest_rows,
+                COUNT(DISTINCT market_id) AS latest_markets,
+                AVG(volume) AS latest_avg_volume,
+                AVG(liquidity) AS latest_avg_liquidity,
+                SUM(CASE WHEN yes_price IS NOT NULL THEN 1 ELSE 0 END) AS rows_with_price,
+                SUM(CASE WHEN volume IS NOT NULL THEN 1 ELSE 0 END) AS rows_with_volume,
+                SUM(CASE WHEN liquidity IS NOT NULL THEN 1 ELSE 0 END) AS rows_with_liquidity
+            FROM market_snapshots
+            WHERE snapshot_time = ?
+            GROUP BY platform
+        )
+        SELECT
+            h.platform,
+            h.total_rows,
+            h.historical_markets,
+            h.first_snapshot,
+            h.latest_snapshot,
+            h.historical_avg_volume,
+            h.historical_avg_liquidity,
+            COALESCE(l.latest_rows, 0) AS latest_rows,
+            COALESCE(l.latest_markets, 0) AS latest_markets,
+            l.latest_avg_volume,
+            l.latest_avg_liquidity,
+            COALESCE(l.rows_with_price, 0) AS rows_with_price,
+            COALESCE(l.rows_with_volume, 0) AS rows_with_volume,
+            COALESCE(l.rows_with_liquidity, 0) AS rows_with_liquidity
+        FROM historical h
+        LEFT JOIN latest l USING (platform)
+        ORDER BY h.total_rows DESC
+        """,
+        [latest_snapshot],
+    )
+
+    rows = _rows_as_dicts(cursor)
+    max_total_rows = max((int(item.get("total_rows") or 0) for item in rows), default=1)
+
+    output: List[Dict[str, Any]] = []
+    for item in rows:
+        latest_rows = int(item.get("latest_rows") or 0)
+        rows_with_price = int(item.get("rows_with_price") or 0)
+        rows_with_volume = int(item.get("rows_with_volume") or 0)
+        rows_with_liquidity = int(item.get("rows_with_liquidity") or 0)
+
+        def pct(numerator: int, denominator: int) -> float:
+            if denominator <= 0:
+                return 0.0
+            return round((numerator / denominator) * 100, 1)
+
+        total_rows = int(item.get("total_rows") or 0)
+
+        output.append(
+            {
+                **item,
+                "platform_display": str(item.get("platform") or "Unknown").title(),
+                "total_rows_display": f"{total_rows:,}",
+                "historical_markets_display": f"{int(item.get('historical_markets') or 0):,}",
+                "latest_rows_display": f"{latest_rows:,}",
+                "latest_markets_display": f"{int(item.get('latest_markets') or 0):,}",
+                "historical_avg_volume_display": _display_number(item.get("historical_avg_volume")),
+                "historical_avg_liquidity_display": _display_number(item.get("historical_avg_liquidity")),
+                "latest_avg_volume_display": _display_number(item.get("latest_avg_volume")),
+                "latest_avg_liquidity_display": _display_number(item.get("latest_avg_liquidity")),
+                "first_snapshot_display": _display_datetime(item.get("first_snapshot")),
+                "latest_snapshot_display": _display_datetime(item.get("latest_snapshot")),
+                "coverage_width": max(3, round((total_rows / max_total_rows) * 100, 2)),
+                "price_coverage": pct(rows_with_price, latest_rows),
+                "volume_coverage": pct(rows_with_volume, latest_rows),
+                "liquidity_coverage": pct(rows_with_liquidity, latest_rows),
+            }
+        )
+    return output
 
 def _display_number(value: Any) -> str:
     if value is None:
@@ -565,6 +660,32 @@ def explorer_overview(request: Request):
             },
             "growth": growth,
             "platform_rows": platform_rows,
+            "error": error,
+        },
+    )
+
+
+@router.get("/platforms")
+def explorer_platforms(request: Request):
+    error: Optional[str] = None
+    rows: List[Dict[str, Any]] = []
+    latest_snapshot: Optional[Any] = None
+
+    try:
+        with _connect() as connection:
+            latest_snapshot = _latest_snapshot(connection)
+            rows = _platform_comparison(connection)
+    except Exception as exc:
+        error = str(exc)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/platforms.html",
+        context={
+            "page_title": "Platforms",
+            "rows": rows,
+            "latest_snapshot": _display_datetime(latest_snapshot),
+            "platform_count": len(rows),
             "error": error,
         },
     )
