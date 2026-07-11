@@ -13,8 +13,8 @@ import duckdb
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
-PARSER_VERSION = "semantic-v1.0"
-BATCH_SIZE = 2_000
+PARSER_VERSION = "semantic-v1.1-low-memory"
+BATCH_SIZE = 250
 
 STOPWORDS = {
     "a", "an", "and", "are", "at", "be", "before", "by", "for", "from", "how",
@@ -528,9 +528,20 @@ def main() -> None:
     print(f"[semantics] Opening {DB_PATH}")
     connection = duckdb.connect(str(DB_PATH))
 
+    temp_dir = DB_PATH.parent / "duckdb_tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Keep the parser stable on small Render instances.
+    connection.execute("SET threads = 1")
+    connection.execute("SET preserve_insertion_order = false")
+    connection.execute("SET memory_limit = '300MB'")
+    connection.execute(f"SET temp_directory = '{temp_dir.as_posix()}'")
+
     try:
-        cursor = connection.execute(
+        print("[semantics] Building temporary latest-market table...")
+        connection.execute(
             """
+            CREATE OR REPLACE TEMP TABLE latest_unique_markets AS
             SELECT
                 platform,
                 market_id,
@@ -553,11 +564,39 @@ def main() -> None:
             """
         )
 
-        column_names = [item[0] for item in cursor.description]
-        processed = 0
+        total_unique = connection.execute(
+            "SELECT COUNT(*) FROM latest_unique_markets"
+        ).fetchone()[0]
+        print(f"[semantics] Latest unique markets: {total_unique:,}")
 
-        while True:
-            raw_batch = cursor.fetchmany(BATCH_SIZE)
+        processed = 0
+        offset = 0
+
+        while offset < total_unique:
+            batch_cursor = connection.execute(
+                """
+                SELECT
+                    platform,
+                    market_id,
+                    title,
+                    category,
+                    start_date,
+                    close_date,
+                    resolution_date,
+                    status,
+                    outcome,
+                    resolution_source,
+                    raw_url,
+                    snapshot_time
+                FROM latest_unique_markets
+                ORDER BY platform, market_id
+                LIMIT ? OFFSET ?
+                """,
+                [BATCH_SIZE, offset],
+            )
+
+            column_names = [item[0] for item in batch_cursor.description]
+            raw_batch = batch_cursor.fetchall()
             if not raw_batch:
                 break
 
@@ -579,7 +618,13 @@ def main() -> None:
                 raise
 
             processed += len(parsed_batch)
-            print(f"[semantics] processed {processed:,} unique markets")
+            offset += len(parsed_batch)
+
+            if processed % 5_000 == 0 or processed == total_unique:
+                print(
+                    f"[semantics] processed {processed:,} / "
+                    f"{total_unique:,} unique markets"
+                )
 
         print(f"[semantics] Latest unique markets processed: {processed:,}")
 
