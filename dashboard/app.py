@@ -5,15 +5,16 @@ from typing import Any, Dict, Iterable, Optional
 
 import duckdb
 import pandas as pd
-import plotly.express as px
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-# Auto-refresh disabled for Render stability
 
-# =========================
-# Configuration
-# =========================
+# Ultra-stable Streamlit explorer for Render
+# - No Plotly
+# - No autorefresh
+# - Small query limits
+# - Heavy matcher only runs when clicked
+# - Conservative DuckDB read settings
 
 load_dotenv()
 
@@ -28,11 +29,6 @@ API_BASE_URL = os.getenv(
 )
 
 st.set_page_config(page_title="Prediction Market Dataset Explorer", layout="wide")
-# st_autorefresh(interval=60 * 1000, limit=None, key="live_dashboard_refresh")
-
-# =========================
-# Helpers
-# =========================
 
 
 def get_query_param(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -43,16 +39,12 @@ def get_query_param(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def open_db() -> duckdb.DuckDBPyConnection:
-    """Open DuckDB in a conservative single-threaded mode for Render stability."""
+    conn = duckdb.connect(DB_PATH, read_only=True)
     try:
-        return duckdb.connect(DB_PATH, read_only=True, config={"threads": "1"})
-    except TypeError:
-        conn = duckdb.connect(DB_PATH, read_only=True)
-        try:
-            conn.execute("PRAGMA threads=1")
-        except Exception:
-            pass
-        return conn
+        conn.execute("PRAGMA threads=1")
+    except Exception:
+        pass
+    return conn
 
 
 def sql_df(
@@ -61,16 +53,15 @@ def sql_df(
     params: Optional[Iterable[Any]] = None,
 ) -> pd.DataFrame:
     if params is None:
-        return conn.execute(query).df().copy()
-    return conn.execute(query, list(params)).df().copy()
+        return conn.execute(query).df()
+    return conn.execute(query, list(params)).df()
 
 
-def show_df(df: pd.DataFrame) -> None:
-    # width="stretch" avoids repeated Streamlit deprecation warnings and keeps tables responsive.
-    st.dataframe(df, width="stretch", hide_index=True)
+def show_df(df: pd.DataFrame, height: int = 420) -> None:
+    st.dataframe(df, use_container_width=True, hide_index=True, height=height)
 
 
-def safe_sql_text(value: str) -> str:
+def safe_sql_text(value: Any) -> str:
     return str(value or "").replace("'", "''")
 
 
@@ -95,11 +86,31 @@ def similarity(a: Any, b: Any) -> float:
     return SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
 
 
+def token_set(title: Any) -> set:
+    return {w for w in normalize_title(title).split() if len(w) >= 3}
+
+
+def jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def platform_badge(value: Any) -> str:
+    key = safe_str(value).lower()
+    badges = {
+        "polymarket": "🟣 Polymarket",
+        "predictit": "🔵 PredictIt",
+        "kalshi": "🟠 Kalshi",
+        "manifold": "🟢 Manifold",
+    }
+    return badges.get(key, safe_str(value).title())
+
+
 def validate_api_key(api_key: str) -> Optional[Dict[str, Any]]:
     api_key = str(api_key or "").strip()
     if not api_key:
         return None
-
     try:
         response = requests.get(
             f"{API_BASE_URL}/v1/account",
@@ -112,10 +123,6 @@ def validate_api_key(api_key: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-
-# =========================
-# Account / access gate
-# =========================
 
 query_api_key = get_query_param("api_key")
 if query_api_key:
@@ -139,7 +146,6 @@ with st.sidebar:
     st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
     st.link_button("Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
     st.link_button("API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
-
     st.caption("Signup, login, subscriptions, billing, API keys, and usage are managed in the main customer portal.")
 
     if account_status:
@@ -180,9 +186,7 @@ with st.sidebar:
 
 if not is_active_subscription:
     st.warning("A paid subscription is required to access the Dataset Explorer.")
-    st.write(
-        "Use the main customer portal to choose a plan, then open the Dataset Explorer from your customer dashboard."
-    )
+    st.write("Use the main customer portal to choose a plan, then open the Dataset Explorer from your customer dashboard.")
     st.link_button("Go to Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
     st.stop()
 
@@ -192,16 +196,11 @@ if page == "Market Matcher" and not is_professional:
     st.link_button("Upgrade to Professional", f"{ACCOUNT_PORTAL_URL}/pricing")
     st.stop()
 
-# =========================
-# Dataset filters
-# =========================
-
 conn = open_db()
 
 try:
     platform_filter_sql = ""
     if page == "Market Detail":
-        # Kalshi currently appears in the dataset but does not have useful Market Detail history.
         platform_filter_sql = "AND LOWER(platform) <> 'kalshi'"
 
     platforms_df = sql_df(
@@ -214,7 +213,7 @@ try:
         ORDER BY platform
         """,
     )
-    platforms = ["All"] + platforms_df["platform"].dropna().tolist()
+    platforms = ["All"] + platforms_df["platform"].dropna().astype(str).tolist()
 except Exception:
     platforms = ["All"]
 
@@ -231,22 +230,25 @@ if search:
 where_clause = "WHERE " + " AND ".join(filters) if filters else ""
 latest_filter = "AND " + " AND ".join(filters) if filters else ""
 
-# =========================
-# Pages
-# =========================
-
 try:
     if page == "Dashboard":
-        total_rows = conn.execute(f"SELECT COUNT(*) FROM market_snapshots {where_clause}").fetchone()[0]
-        unique_markets = conn.execute(f"SELECT COUNT(DISTINCT market_id) FROM market_snapshots {where_clause}").fetchone()[0]
-        snapshots = conn.execute(f"SELECT COUNT(DISTINCT snapshot_time) FROM market_snapshots {where_clause}").fetchone()[0]
-        latest_snapshot = conn.execute(f"SELECT MAX(snapshot_time) FROM market_snapshots {where_clause}").fetchone()[0]
+        stats = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT market_id) AS unique_markets,
+                COUNT(DISTINCT snapshot_time) AS snapshots,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM market_snapshots
+            {where_clause}
+            """
+        ).fetchone()
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Rows", f"{total_rows:,}")
-        c2.metric("Unique Markets", f"{unique_markets:,}")
-        c3.metric("Snapshots", f"{snapshots:,}")
-        c4.metric("Latest Snapshot", str(latest_snapshot)[:22])
+        c1.metric("Total Rows", f"{stats[0]:,}")
+        c2.metric("Unique Markets", f"{stats[1]:,}")
+        c3.metric("Snapshots", f"{stats[2]:,}")
+        c4.metric("Latest Snapshot", str(stats[3])[:22])
 
         st.divider()
         st.subheader("Recent Snapshot Growth")
@@ -263,9 +265,8 @@ try:
         )
         if not growth.empty:
             growth["snapshot_time"] = pd.to_datetime(growth["snapshot_time"])
-            growth = growth.sort_values("snapshot_time")
-            fig = px.line(growth, x="snapshot_time", y="rows", markers=True, title="Rows Collected Over Recent Snapshots")
-            st.plotly_chart(fig, width="stretch")
+            growth = growth.sort_values("snapshot_time").set_index("snapshot_time")
+            st.line_chart(growth["rows"], use_container_width=True)
 
         st.subheader("Platform Coverage")
         platform_stats = sql_df(
@@ -285,13 +286,11 @@ try:
             ORDER BY rows DESC
             """,
         )
-        show_df(platform_stats)
+        show_df(platform_stats, height=260)
 
         if not platform_stats.empty:
-            fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
-            st.plotly_chart(fig_rows, width="stretch")
-            fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
-            st.plotly_chart(fig_unique, width="stretch")
+            st.subheader("Rows By Platform")
+            st.bar_chart(platform_stats[["platform", "rows"]].set_index("platform"), use_container_width=True)
 
     elif page == "Markets":
         st.subheader("Latest Top Volume Markets")
@@ -318,12 +317,12 @@ try:
             WHERE 1=1
             {latest_filter}
             ORDER BY volume DESC NULLS LAST
-            LIMIT 120
+            LIMIT 200
             """,
         )
         show_df(top_volume)
         st.download_button(
-            "Download latest markets CSV",
+            "Download current table CSV",
             top_volume.to_csv(index=False),
             file_name="prediction_market_latest_markets.csv",
             mime="text/csv",
@@ -348,16 +347,14 @@ try:
             ORDER BY rows DESC
             """,
         )
-        show_df(platform_stats)
+        show_df(platform_stats, height=300)
         if not platform_stats.empty:
-            fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
-            st.plotly_chart(fig_rows, width="stretch")
-            fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
-            st.plotly_chart(fig_unique, width="stretch")
+            st.bar_chart(platform_stats[["platform", "rows"]].set_index("platform"), use_container_width=True)
+            st.bar_chart(platform_stats[["platform", "unique_markets"]].set_index("platform"), use_container_width=True)
 
     elif page == "Movers":
         st.subheader("Market Movers")
-        st.caption("Largest moves from the most recent 2 days of snapshots.")
+        st.caption("Largest moves from the most recent 12 hours of snapshots.")
         movers = sql_df(
             conn,
             f"""
@@ -367,7 +364,7 @@ try:
             recent AS (
                 SELECT *
                 FROM market_snapshots
-                WHERE snapshot_time >= (SELECT max_time FROM latest_time) - INTERVAL '2 days'
+                WHERE snapshot_time >= (SELECT max_time FROM latest_time) - INTERVAL '12 hours'
                   AND yes_price IS NOT NULL
                   {latest_filter}
             ),
@@ -394,284 +391,130 @@ try:
             LIMIT 75
             """,
         )
-        display_cols = [
-            "platform", "market_id", "title", "snapshots", "low_price", "high_price",
-            "first_price", "last_price", "price_change", "volume_change", "liquidity_change",
-        ]
         if movers.empty:
             st.info("No movers found yet. Let the scheduler collect more snapshots.")
         else:
-            show_df(movers[display_cols])
-            st.subheader("Top Gainers")
-            show_df(movers.sort_values("price_change", ascending=False).head(25)[display_cols])
-            st.subheader("Top Losers")
-            show_df(movers.sort_values("price_change", ascending=True).head(25)[display_cols])
-            st.subheader("Volume Movers")
-            show_df(movers.sort_values("volume_change", ascending=False).head(25)[display_cols])
-            st.subheader("Liquidity Movers")
-            show_df(movers.sort_values("liquidity_change", ascending=False).head(25)[display_cols])
+            show_df(movers)
+            st.download_button(
+                "Download movers CSV",
+                movers.to_csv(index=False),
+                file_name="prediction_market_movers.csv",
+                mime="text/csv",
+            )
 
     elif page == "Market Matcher":
         st.subheader("Market Matcher")
-        st.caption(
-            "Compare likely equivalent live prediction markets across all supported platform pairs."
-        )
-
-        st.info(
-            "Use the platform-pair filter to compare Polymarket ↔ Kalshi, PredictIt ↔ Manifold, Kalshi ↔ Manifold, or any other available pair."
-        )
+        st.caption("Compare likely equivalent live prediction markets across supported platform pairs.")
 
         min_match_score = st.slider("Minimum match score", 0.10, 1.00, 0.30, 0.05)
         min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
-        max_per_platform = st.slider("Markets per platform", 50, 200, 100, 25)
+        max_per_platform = st.slider("Markets per platform", 50, 250, 100, 25)
         keyword_focus = st.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup...")
 
         if not st.button("Run Market Matcher", type="primary"):
-            st.info("Choose filters, then click Run Market Matcher. This keeps the explorer stable on Render.")
-            st.stop()
-
-        matcher_filter = latest_filter
-        if keyword_focus:
-            safe_keyword = safe_sql_text(keyword_focus.lower())
-            matcher_filter += f" AND LOWER(title) LIKE '%{safe_keyword}%'"
-
-        latest = sql_df(
-            conn,
-            f"""
-            WITH latest AS (
-                SELECT *
-                FROM market_snapshots
-                WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM market_snapshots)
-            ),
-            ranked AS (
-                SELECT
-                    platform,
-                    market_id,
-                    title,
-                    yes_price,
-                    no_price,
-                    volume,
-                    liquidity,
-                    raw_url,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY platform
-                        ORDER BY COALESCE(volume, 0) DESC, COALESCE(liquidity, 0) DESC
-                    ) AS rn
-                FROM latest
-                WHERE title IS NOT NULL
-                  AND yes_price IS NOT NULL
-                  {matcher_filter}
-            )
-            SELECT *
-            FROM ranked
-            WHERE rn <= ?
-            """,
-            [max_per_platform],
-        )
-
-        def platform_badge(value: Any) -> str:
-            key = safe_str(value).lower()
-            badges = {
-                "polymarket": "🟣 Polymarket",
-                "predictit": "🔵 PredictIt",
-                "kalshi": "🟠 Kalshi",
-                "manifold": "🟢 Manifold",
-            }
-            return badges.get(key, safe_str(value).title())
-
-        if latest.empty or latest["platform"].nunique() < 2:
-            st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
+            st.info("Set filters, then click Run Market Matcher. This keeps the explorer stable.")
         else:
-            platforms_loaded = sorted([str(p).lower() for p in latest["platform"].dropna().unique()])
-            pair_options = ["All platform pairs"]
-            for i, left in enumerate(platforms_loaded):
-                for right in platforms_loaded[i + 1:]:
-                    pair_options.append(f"{platform_badge(left)} ↔ {platform_badge(right)}")
+            matcher_filter = latest_filter
+            if keyword_focus:
+                matcher_filter += f" AND LOWER(title) LIKE '%{safe_sql_text(keyword_focus.lower())}%'"
 
-            selected_pair = st.selectbox("Platform pair", pair_options)
-            selected_pair_keys = None
-            if selected_pair != "All platform pairs":
-                left_label, right_label = [x.strip() for x in selected_pair.split("↔")]
-                reverse_badges = {platform_badge(p): p for p in platforms_loaded}
-                selected_pair_keys = {reverse_badges.get(left_label, left_label.lower()), reverse_badges.get(right_label, right_label.lower())}
-
-            platform_counts = latest.groupby("platform").size().reset_index(name="Markets loaded")
-            platform_counts["Platform"] = platform_counts["platform"].apply(platform_badge)
-            platform_counts = platform_counts[["Platform", "Markets loaded"]]
-            st.caption("Markets loaded into matcher")
-            show_df(platform_counts)
-
-            def token_set(title: Any) -> set:
-                norm = normalize_title(title)
-                return {w for w in norm.split() if len(w) >= 3}
-
-            def jaccard(a: set, b: set) -> float:
-                if not a or not b:
-                    return 0.0
-                return len(a & b) / len(a | b)
-
-            rows = latest.to_dict("records")
-            prepared = []
-            for row in rows:
-                prepared.append({**row, "tokens": token_set(row.get("title"))})
-
-            matches = []
-            for i, a in enumerate(prepared):
-                for b in prepared[i + 1:]:
-                    platform_a = str(a.get("platform")).lower()
-                    platform_b = str(b.get("platform")).lower()
-
-                    if platform_a == platform_b:
-                        continue
-
-                    if selected_pair_keys and {platform_a, platform_b} != selected_pair_keys:
-                        continue
-
-                    title_a = a.get("title")
-                    title_b = b.get("title")
-                    tokens_a = a.get("tokens", set())
-                    tokens_b = b.get("tokens", set())
-
-                    title_score = similarity(title_a, title_b)
-                    token_score = jaccard(tokens_a, tokens_b)
-                    overlap_terms = sorted(tokens_a & tokens_b)
-
-                    # Weighted score. Token overlap matters more than raw full-title similarity
-                    # because different platforms often phrase equivalent markets differently.
-                    match_score = (0.60 * token_score) + (0.40 * title_score)
-
-                    if len(overlap_terms) >= 2:
-                        match_score += 0.10
-                    if len(overlap_terms) >= 3:
-                        match_score += 0.10
-                    match_score = min(match_score, 1.0)
-
-                    if match_score < min_match_score:
-                        continue
-
-                    try:
-                        price_a = float(a.get("yes_price"))
-                        price_b = float(b.get("yes_price"))
-                    except Exception:
-                        continue
-
-                    spread = abs(price_a - price_b)
-                    if spread < min_spread:
-                        continue
-
-                    matches.append({
-                        "platform_a": platform_a,
-                        "title_a": title_a,
-                        "price_a": price_a,
-                        "platform_b": platform_b,
-                        "title_b": title_b,
-                        "price_b": price_b,
-                        "price_difference": spread,
-                        "match_score": match_score,
-                        "title_similarity": title_score,
-                        "token_overlap": token_score,
-                        "shared_terms": ", ".join(overlap_terms[:12]),
-                        "volume_a": a.get("volume"),
-                        "volume_b": b.get("volume"),
-                        "liquidity_a": a.get("liquidity"),
-                        "liquidity_b": b.get("liquidity"),
-                        "market_id_a": a.get("market_id"),
-                        "market_id_b": b.get("market_id"),
-                        "url_a": a.get("raw_url"),
-                        "url_b": b.get("raw_url"),
-                    })
-
-            matches_df = pd.DataFrame(matches)
-            if matches_df.empty:
-                st.info(
-                    "No matches found. Try lowering Minimum match score to 0.10, setting price difference to 0.00, selecting All platform pairs, or using a focused keyword."
+            latest = sql_df(
+                conn,
+                f"""
+                WITH latest AS (
+                    SELECT *
+                    FROM market_snapshots
+                    WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM market_snapshots)
+                ),
+                ranked AS (
+                    SELECT
+                        platform,
+                        market_id,
+                        title,
+                        yes_price,
+                        no_price,
+                        volume,
+                        liquidity,
+                        raw_url,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY platform
+                            ORDER BY COALESCE(volume, 0) DESC, COALESCE(liquidity, 0) DESC
+                        ) AS rn
+                    FROM latest
+                    WHERE title IS NOT NULL
+                      AND yes_price IS NOT NULL
+                      {matcher_filter}
                 )
+                SELECT *
+                FROM ranked
+                WHERE rn <= ?
+                """,
+                [max_per_platform],
+            )
+
+            if latest.empty or latest["platform"].nunique() < 2:
+                st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
             else:
-                matches_df = matches_df.sort_values(
-                    ["match_score", "price_difference"], ascending=False
-                ).head(100)
+                rows = latest.to_dict("records")
+                prepared = [{**row, "tokens": token_set(row.get("title"))} for row in rows]
 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Potential Matches", f"{len(matches_df):,}")
-                c2.metric("Platform Pairs", f"{matches_df[['platform_a', 'platform_b']].drop_duplicates().shape[0]:,}")
-                c3.metric("Largest Difference", f"{matches_df['price_difference'].max() * 100:.2f}%")
-                c4.metric("Avg Match Score", f"{matches_df['match_score'].mean() * 100:.0f}%")
+                matches = []
+                for i, a in enumerate(prepared):
+                    for b in prepared[i + 1:]:
+                        platform_a = str(a.get("platform")).lower()
+                        platform_b = str(b.get("platform")).lower()
+                        if platform_a == platform_b:
+                            continue
 
-                pair_summary = matches_df.copy()
-                pair_summary["Pair"] = pair_summary.apply(
-                    lambda r: " ↔ ".join(sorted([platform_badge(r["platform_a"]), platform_badge(r["platform_b"])])),
-                    axis=1,
-                )
-                pair_summary = (
-                    pair_summary.groupby("Pair")
-                    .agg(
-                        Matches=("Pair", "count"),
-                        Avg_Match=("match_score", "mean"),
-                        Max_Difference=("price_difference", "max"),
+                        title_score = similarity(a.get("title"), b.get("title"))
+                        token_score = jaccard(a.get("tokens", set()), b.get("tokens", set()))
+                        overlap_terms = sorted(a.get("tokens", set()) & b.get("tokens", set()))
+
+                        match_score = (0.60 * token_score) + (0.40 * title_score)
+                        if len(overlap_terms) >= 2:
+                            match_score += 0.10
+                        if len(overlap_terms) >= 3:
+                            match_score += 0.10
+                        match_score = min(match_score, 1.0)
+
+                        if match_score < min_match_score:
+                            continue
+
+                        try:
+                            price_a = float(a.get("yes_price"))
+                            price_b = float(b.get("yes_price"))
+                        except Exception:
+                            continue
+
+                        spread = abs(price_a - price_b)
+                        if spread < min_spread:
+                            continue
+
+                        matches.append({
+                            "Platform A": platform_badge(platform_a),
+                            "Market A": a.get("title"),
+                            "YES A": f"{price_a:.2%}",
+                            "Platform B": platform_badge(platform_b),
+                            "Market B": b.get("title"),
+                            "YES B": f"{price_b:.2%}",
+                            "Difference": f"{spread:.2%}",
+                            "Match Score": f"{match_score:.0%}",
+                            "Shared Terms": ", ".join(overlap_terms[:10]),
+                            "URL A": a.get("raw_url"),
+                            "URL B": b.get("raw_url"),
+                        })
+
+                matches_df = pd.DataFrame(matches)
+                if matches_df.empty:
+                    st.info("No matches found. Try lowering the match score, lowering price difference, or using a focused keyword.")
+                else:
+                    show_df(matches_df.head(150), height=600)
+                    st.download_button(
+                        "Download matcher results CSV",
+                        matches_df.to_csv(index=False),
+                        file_name="prediction_market_matcher_results.csv",
+                        mime="text/csv",
                     )
-                    .reset_index()
-                    .sort_values("Matches", ascending=False)
-                )
-                pair_summary["Avg Match"] = pair_summary["Avg_Match"].map(lambda x: f"{x:.0%}")
-                pair_summary["Max Difference"] = pair_summary["Max_Difference"].map(lambda x: f"{x:.2%}")
-                st.subheader("Platform Pair Coverage")
-                show_df(pair_summary[["Pair", "Matches", "Avg Match", "Max Difference"]])
-
-                display = matches_df.copy()
-                display["Platform A"] = display["platform_a"].apply(platform_badge)
-                display["Platform B"] = display["platform_b"].apply(platform_badge)
-                display["Market A"] = display["title_a"]
-                display["Market B"] = display["title_b"]
-                display["YES A"] = display["price_a"]
-                display["YES B"] = display["price_b"]
-                display["Difference"] = display["price_difference"]
-                display["Match Score"] = display["match_score"]
-                display["Title Similarity"] = display["title_similarity"]
-                display["Token Overlap"] = display["token_overlap"]
-                display["Shared Terms"] = display["shared_terms"]
-                display["URL A"] = display["url_a"]
-                display["URL B"] = display["url_b"]
-
-                display_cols = [
-                    "Platform A", "Market A", "YES A",
-                    "Platform B", "Market B", "YES B",
-                    "Difference", "Match Score", "Shared Terms",
-                    "Title Similarity", "Token Overlap", "URL A", "URL B",
-                ]
-                display_table = display[display_cols].copy()
-                for col in ["YES A", "YES B", "Difference"]:
-                    display_table[col] = display_table[col].map(lambda x: f"{float(x):.2%}" if pd.notna(x) else "")
-                for col in ["Match Score", "Title Similarity", "Token Overlap"]:
-                    display_table[col] = display_table[col].map(lambda x: f"{float(x):.0%}" if pd.notna(x) else "")
-
-                st.subheader("Matched Markets")
-                st.caption("Color gradients are disabled on Render for stability. Scores are still shown as percentages.")
-                st.dataframe(display_table, width="stretch", hide_index=True)
-
-                st.download_button(
-                    "Download matcher results CSV",
-                    matches_df.to_csv(index=False),
-                    file_name="prediction_market_matcher_results.csv",
-                    mime="text/csv",
-                )
-
-                chart_df = matches_df.head(30).copy()
-                chart_df["pair"] = chart_df.apply(
-                    lambda r: f"{platform_badge(r['platform_a'])} ↔ {platform_badge(r['platform_b'])}",
-                    axis=1,
-                )
-                chart_df["price_difference_pct"] = chart_df["price_difference"] * 100
-                fig = px.bar(
-                    chart_df,
-                    x="price_difference_pct",
-                    y="pair",
-                    orientation="h",
-                    title="Largest Matched Market Price Differences",
-                    color="match_score",
-                    color_continuous_scale="RdYlGn",
-                    labels={"price_difference_pct": "Price Difference (%)", "match_score": "Match Score"},
-                )
-                st.plotly_chart(fig, width="stretch")
 
     elif page == "Market Detail":
         st.subheader("Market Detail")
@@ -706,7 +549,7 @@ try:
             markets["label"] = (
                 markets["platform"].fillna("").astype(str)
                 + " | "
-                + markets["title"].fillna("").astype(str).str[:120]
+                + markets["title"].fillna("").astype(str).str[:100]
                 + " | "
                 + markets["market_id"].fillna("").astype(str)
             )
@@ -718,58 +561,46 @@ try:
             history = sql_df(
                 conn,
                 """
-                SELECT *
-                FROM (
-                    SELECT
-                        snapshot_time,
-                        platform,
-                        market_id,
-                        title,
-                        yes_price,
-                        no_price,
-                        volume,
-                        liquidity,
-                        status,
-                        raw_url
-                    FROM market_snapshots
-                    WHERE platform = ?
-                      AND market_id = ?
-                    ORDER BY snapshot_time DESC
-                    LIMIT 500
-                )
-                ORDER BY snapshot_time
+                SELECT
+                    snapshot_time,
+                    platform,
+                    market_id,
+                    title,
+                    yes_price,
+                    no_price,
+                    volume,
+                    liquidity,
+                    status,
+                    raw_url
+                FROM market_snapshots
+                WHERE platform = ?
+                  AND market_id = ?
+                ORDER BY snapshot_time DESC
+                LIMIT 300
                 """,
                 [selected_platform_detail, selected_market_id],
             )
-
-            show_df(history.tail(25))
+            history = history.sort_values("snapshot_time")
+            show_df(history.tail(50))
 
             if not history.empty:
                 history["snapshot_time"] = pd.to_datetime(history["snapshot_time"])
-                latest_row = history.sort_values("snapshot_time").iloc[-1]
+                latest_row = history.iloc[-1]
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Latest YES", latest_row.get("yes_price"))
                 c2.metric("Latest Volume", latest_row.get("volume"))
                 c3.metric("Observations Loaded", len(history))
 
-                st.subheader("YES Price History")
-                price_df = history.dropna(subset=["yes_price"])
+                price_df = history.dropna(subset=["yes_price"])[["snapshot_time", "yes_price"]].set_index("snapshot_time")
                 if not price_df.empty:
-                    fig_price = px.line(price_df, x="snapshot_time", y="yes_price", markers=True, title="YES Price History")
-                    st.plotly_chart(fig_price, width="stretch")
+                    st.subheader("YES Price History")
+                    st.line_chart(price_df, use_container_width=True)
 
-                st.subheader("Volume History")
-                volume_df = history.dropna(subset=["volume"])
+                volume_df = history.dropna(subset=["volume"])[["snapshot_time", "volume"]].set_index("snapshot_time")
                 if not volume_df.empty:
-                    fig_volume = px.bar(volume_df, x="snapshot_time", y="volume", title="Volume History")
-                    st.plotly_chart(fig_volume, width="stretch")
-
-                st.subheader("Liquidity History")
-                liquidity_df = history.dropna(subset=["liquidity"])
-                if not liquidity_df.empty:
-                    fig_liquidity = px.area(liquidity_df, x="snapshot_time", y="liquidity", title="Liquidity History")
-                    st.plotly_chart(fig_liquidity, width="stretch")
+                    st.subheader("Volume History")
+                    st.bar_chart(volume_df, use_container_width=True)
 
                 st.download_button(
                     "Download Market CSV",
@@ -798,15 +629,8 @@ try:
             """,
         )
         show_df(health)
-
         if not health.empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                fig_rows = px.bar(health, x="platform", y="total_rows", title="Rows By Platform")
-                st.plotly_chart(fig_rows, width="stretch")
-            with col2:
-                fig_markets = px.bar(health, x="platform", y="total_markets", title="Markets By Platform")
-                st.plotly_chart(fig_markets, width="stretch")
+            st.bar_chart(health[["platform", "total_rows"]].set_index("platform"), use_container_width=True)
 
     elif page == "API":
         st.subheader("Prediction Market Dataset API")
@@ -814,16 +638,13 @@ try:
 
         st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
         st.link_button("Open API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
+        st.link_button("API Examples", f"{ACCOUNT_PORTAL_URL}/api-examples")
 
         st.divider()
         st.subheader("Example Request")
-        st.code(
-            f'''curl -H "Authorization: Bearer YOUR_API_KEY" \\
-  "{API_BASE_URL}/v1/search?q=bitcoin"''',
-            language="bash",
-        )
+        example = 'curl -H "Authorization: Bearer YOUR_API_KEY" \\\n  "' + API_BASE_URL + '/v1/search?q=bitcoin"'
+        st.code(example, language="bash")
 
-        st.subheader("Core Endpoints")
         endpoints = pd.DataFrame([
             {"Endpoint": "/v1/health", "Description": "Dataset health and latest snapshot metadata"},
             {"Endpoint": "/v1/stats", "Description": "Snapshot, market, and platform counts"},
@@ -836,7 +657,7 @@ try:
             {"Endpoint": "/v1/categories", "Description": "Category-level market counts"},
             {"Endpoint": "/v1/account", "Description": "Authenticated account and usage status"},
         ])
-        show_df(endpoints)
+        show_df(endpoints, height=360)
 
 except Exception as exc:
     st.error(f"Dashboard error: {exc}")
