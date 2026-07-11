@@ -1,4 +1,15 @@
-from fastapi import APIRouter, Request
+import csv
+import io
+import math
+import os
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlencode
+
+import duckdb
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
 router = APIRouter(
@@ -8,6 +19,7 @@ router = APIRouter(
 )
 
 templates = Jinja2Templates(directory="api/templates")
+DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 
 TOOLS = [
     {
@@ -20,7 +32,7 @@ TOOLS = [
         "name": "Markets",
         "slug": "markets",
         "description": "Search, filter, sort, paginate, and export prediction market records.",
-        "status": "Next",
+        "status": "Live",
     },
     {
         "name": "Platforms",
@@ -54,6 +66,200 @@ TOOLS = [
     },
 ]
 
+SORT_COLUMNS = {
+    "volume": "volume",
+    "liquidity": "liquidity",
+    "yes_price": "yes_price",
+    "no_price": "no_price",
+    "title": "title",
+    "platform": "platform",
+    "snapshot_time": "snapshot_time",
+}
+
+
+def _connect() -> duckdb.DuckDBPyConnection:
+    connection = duckdb.connect(DB_PATH, read_only=True)
+    try:
+        connection.execute("PRAGMA threads=1")
+    except Exception:
+        pass
+    return connection
+
+
+def _rows_as_dicts(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
+    columns = [item[0] for item in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _latest_snapshot(connection: duckdb.DuckDBPyConnection) -> Any:
+    row = connection.execute(
+        "SELECT MAX(snapshot_time) FROM market_snapshots"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _platforms(
+    connection: duckdb.DuckDBPyConnection,
+    latest_snapshot: Any,
+) -> List[str]:
+    if latest_snapshot is None:
+        return []
+    rows = connection.execute(
+        """
+        SELECT DISTINCT platform
+        FROM market_snapshots
+        WHERE snapshot_time = ?
+          AND platform IS NOT NULL
+        ORDER BY platform
+        """,
+        [latest_snapshot],
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def _market_conditions(
+    latest_snapshot: Any,
+    search: str,
+    platform: str,
+) -> Tuple[str, List[Any]]:
+    conditions = ["snapshot_time = ?"]
+    params: List[Any] = [latest_snapshot]
+
+    clean_search = search.strip()
+    clean_platform = platform.strip()
+
+    if clean_search:
+        conditions.append("LOWER(COALESCE(title, '')) LIKE ?")
+        params.append(f"%{clean_search.lower()}%")
+
+    if clean_platform:
+        conditions.append("LOWER(platform) = ?")
+        params.append(clean_platform.lower())
+
+    return " AND ".join(conditions), params
+
+
+def _fetch_markets(
+    connection: duckdb.DuckDBPyConnection,
+    latest_snapshot: Any,
+    search: str,
+    platform: str,
+    sort: str,
+    direction: str,
+    limit: int,
+    offset: int,
+) -> Tuple[List[Dict[str, Any]], int]:
+    where_sql, params = _market_conditions(latest_snapshot, search, platform)
+    sort_sql = SORT_COLUMNS.get(sort, "volume")
+    direction_sql = "ASC" if direction.lower() == "asc" else "DESC"
+
+    total = connection.execute(
+        f"SELECT COUNT(*) FROM market_snapshots WHERE {where_sql}",
+        params,
+    ).fetchone()[0]
+
+    query = f"""
+        SELECT
+            platform,
+            market_id,
+            title,
+            yes_price,
+            no_price,
+            volume,
+            liquidity,
+            status,
+            snapshot_time,
+            raw_url
+        FROM market_snapshots
+        WHERE {where_sql}
+        ORDER BY {sort_sql} {direction_sql} NULLS LAST, title ASC
+        LIMIT ? OFFSET ?
+    """
+    cursor = connection.execute(query, [*params, limit, offset])
+    return _rows_as_dicts(cursor), int(total)
+
+
+def _display_number(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if abs(number) >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.2f}B"
+    if abs(number) >= 1_000_000:
+        return f"{number / 1_000_000:.2f}M"
+    if abs(number) >= 1_000:
+        return f"{number / 1_000:.1f}K"
+    if number.is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.2f}"
+
+
+def _display_price(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if 0 <= number <= 1:
+        return f"{number:.1%}"
+    return f"{number:.4f}"
+
+
+def _display_datetime(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (datetime, date)):
+        return value.isoformat(sep=" ", timespec="seconds")
+    return str(value)
+
+
+def _decorate_market_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["yes_display"] = _display_price(row.get("yes_price"))
+        item["no_display"] = _display_price(row.get("no_price"))
+        item["volume_display"] = _display_number(row.get("volume"))
+        item["liquidity_display"] = _display_number(row.get("liquidity"))
+        item["snapshot_display"] = _display_datetime(row.get("snapshot_time"))
+        output.append(item)
+    return output
+
+
+def _safe_csv_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def _markets_url(
+    *,
+    page: int,
+    page_size: int,
+    search: str,
+    platform: str,
+    sort: str,
+    direction: str,
+    export: bool = False,
+) -> str:
+    params = {
+        "page": page,
+        "page_size": page_size,
+        "q": search,
+        "platform": platform,
+        "sort": sort,
+        "direction": direction,
+    }
+    base = "/explorer/markets/export" if export else "/explorer/markets"
+    return f"{base}?{urlencode(params)}"
+
 
 @router.get("")
 @router.get("/")
@@ -65,6 +271,165 @@ def explorer_menu(request: Request):
             "page_title": "Dataset Explorer",
             "tools": TOOLS,
         },
+    )
+
+
+@router.get("/markets")
+def explorer_markets(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=10, le=100),
+    q: str = Query(default="", max_length=200),
+    platform: str = Query(default="", max_length=50),
+    sort: str = Query(default="volume"),
+    direction: str = Query(default="desc"),
+):
+    selected_sort = sort if sort in SORT_COLUMNS else "volume"
+    selected_direction = "asc" if direction.lower() == "asc" else "desc"
+    rows: List[Dict[str, Any]] = []
+    platforms: List[str] = []
+    total = 0
+    total_pages = 1
+    latest_snapshot: Optional[Any] = None
+    error: Optional[str] = None
+
+    try:
+        with _connect() as connection:
+            latest_snapshot = _latest_snapshot(connection)
+            if latest_snapshot is not None:
+                platforms = _platforms(connection, latest_snapshot)
+                _, total = _fetch_markets(
+                    connection=connection,
+                    latest_snapshot=latest_snapshot,
+                    search=q,
+                    platform=platform,
+                    sort=selected_sort,
+                    direction=selected_direction,
+                    limit=1,
+                    offset=0,
+                )
+                total_pages = max(1, math.ceil(total / page_size))
+                page = min(page, total_pages)
+                offset = (page - 1) * page_size
+                raw_rows, _ = _fetch_markets(
+                    connection=connection,
+                    latest_snapshot=latest_snapshot,
+                    search=q,
+                    platform=platform,
+                    sort=selected_sort,
+                    direction=selected_direction,
+                    limit=page_size,
+                    offset=offset,
+                )
+                rows = _decorate_market_rows(raw_rows)
+    except Exception as exc:
+        error = str(exc)
+
+    previous_url = None
+    next_url = None
+    if page > 1:
+        previous_url = _markets_url(
+            page=page - 1,
+            page_size=page_size,
+            search=q,
+            platform=platform,
+            sort=selected_sort,
+            direction=selected_direction,
+        )
+    if page < total_pages:
+        next_url = _markets_url(
+            page=page + 1,
+            page_size=page_size,
+            search=q,
+            platform=platform,
+            sort=selected_sort,
+            direction=selected_direction,
+        )
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/markets.html",
+        context={
+            "page_title": "Markets",
+            "rows": rows,
+            "platforms": platforms,
+            "selected_platform": platform,
+            "search": q,
+            "sort": selected_sort,
+            "direction": selected_direction,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "previous_url": previous_url,
+            "next_url": next_url,
+            "latest_snapshot": _display_datetime(latest_snapshot),
+            "export_url": _markets_url(
+                page=page,
+                page_size=page_size,
+                search=q,
+                platform=platform,
+                sort=selected_sort,
+                direction=selected_direction,
+                export=True,
+            ),
+            "error": error,
+        },
+    )
+
+
+@router.get("/markets/export")
+def export_markets_page(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=10, le=100),
+    q: str = Query(default="", max_length=200),
+    platform: str = Query(default="", max_length=50),
+    sort: str = Query(default="volume"),
+    direction: str = Query(default="desc"),
+):
+    selected_sort = sort if sort in SORT_COLUMNS else "volume"
+    selected_direction = "asc" if direction.lower() == "asc" else "desc"
+
+    with _connect() as connection:
+        latest_snapshot = _latest_snapshot(connection)
+        if latest_snapshot is None:
+            rows: List[Dict[str, Any]] = []
+        else:
+            offset = (page - 1) * page_size
+            rows, _ = _fetch_markets(
+                connection=connection,
+                latest_snapshot=latest_snapshot,
+                search=q,
+                platform=platform,
+                sort=selected_sort,
+                direction=selected_direction,
+                limit=page_size,
+                offset=offset,
+            )
+
+    output = io.StringIO()
+    fieldnames = [
+        "platform",
+        "market_id",
+        "title",
+        "yes_price",
+        "no_price",
+        "volume",
+        "liquidity",
+        "status",
+        "snapshot_time",
+        "raw_url",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _safe_csv_value(row.get(key)) for key in fieldnames})
+
+    filename = f"prediction_markets_page_{page}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

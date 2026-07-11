@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact markets-hero">
+    <p class="eyebrow">Live warehouse browser</p>
+    <h1>Markets</h1>
+    <p class="hero-copy">
+        Search and filter the latest prediction market snapshot. The server returns
+        only the selected page, so the browser never loads the full warehouse.
+    </p>
+</section>
+
+<section class="markets-summary">
+    <div>
+        <span class="summary-label">Matching markets</span>
+        <strong>{{ "{:,}".format(total) }}</strong>
+    </div>
+    <div>
+        <span class="summary-label">Latest snapshot</span>
+        <strong>{{ latest_snapshot }}</strong>
+    </div>
+    <div>
+        <span class="summary-label">Current page</span>
+        <strong>{{ page }} of {{ total_pages }}</strong>
+    </div>
+</section>
+
+<section class="filter-panel">
+    <form class="market-filters" method="get" action="/explorer/markets">
+        <label>
+            <span>Search titles</span>
+            <input type="search" name="q" value="{{ search }}" placeholder="bitcoin, election, football…">
+        </label>
+
+        <label>
+            <span>Platform</span>
+            <select name="platform">
+                <option value="">All platforms</option>
+                {% for item in platforms %}
+                <option value="{{ item }}" {% if item == selected_platform %}selected{% endif %}>{{ item|title }}</option>
+                {% endfor %}
+            </select>
+        </label>
+
+        <label>
+            <span>Sort by</span>
+            <select name="sort">
+                <option value="volume" {% if sort == "volume" %}selected{% endif %}>Volume</option>
+                <option value="liquidity" {% if sort == "liquidity" %}selected{% endif %}>Liquidity</option>
+                <option value="yes_price" {% if sort == "yes_price" %}selected{% endif %}>YES price</option>
+                <option value="no_price" {% if sort == "no_price" %}selected{% endif %}>NO price</option>
+                <option value="title" {% if sort == "title" %}selected{% endif %}>Title</option>
+                <option value="platform" {% if sort == "platform" %}selected{% endif %}>Platform</option>
+                <option value="snapshot_time" {% if sort == "snapshot_time" %}selected{% endif %}>Snapshot time</option>
+            </select>
+        </label>
+
+        <label>
+            <span>Direction</span>
+            <select name="direction">
+                <option value="desc" {% if direction == "desc" %}selected{% endif %}>Descending</option>
+                <option value="asc" {% if direction == "asc" %}selected{% endif %}>Ascending</option>
+            </select>
+        </label>
+
+        <label>
+            <span>Rows per page</span>
+            <select name="page_size">
+                <option value="25" {% if page_size == 25 %}selected{% endif %}>25</option>
+                <option value="50" {% if page_size == 50 %}selected{% endif %}>50</option>
+                <option value="100" {% if page_size == 100 %}selected{% endif %}>100</option>
+            </select>
+        </label>
+
+        <input type="hidden" name="page" value="1">
+        <button class="button filter-button" type="submit">Apply filters</button>
+        <a class="secondary-button" href="/explorer/markets">Clear</a>
+        <a class="secondary-button" href="{{ export_url }}">Export this page</a>
+    </form>
+</section>
+
+{% if error %}
+<section class="error-panel">
+    <strong>Markets could not be loaded.</strong>
+    <p>{{ error }}</p>
+</section>
+{% elif rows %}
+<section class="table-panel">
+    <div class="table-scroll">
+        <table class="market-table">
+            <thead>
+                <tr>
+                    <th>Platform</th>
+                    <th>Market</th>
+                    <th>YES</th>
+                    <th>NO</th>
+                    <th>Volume</th>
+                    <th>Liquidity</th>
+                    <th>Status</th>
+                    <th>Source</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td><span class="platform-tag platform-{{ row.platform|lower }}">{{ row.platform|title }}</span></td>
+                    <td class="market-title-cell">
+                        <strong>{{ row.title or "Untitled market" }}</strong>
+                        <span class="market-meta">{{ row.market_id }} · {{ row.snapshot_display }}</span>
+                    </td>
+                    <td class="numeric yes-price">{{ row.yes_display }}</td>
+                    <td class="numeric no-price">{{ row.no_display }}</td>
+                    <td class="numeric">{{ row.volume_display }}</td>
+                    <td class="numeric">{{ row.liquidity_display }}</td>
+                    <td>{{ row.status or "—" }}</td>
+                    <td>
+                        {% if row.raw_url %}
+                        <a class="table-link" href="{{ row.raw_url }}" target="_blank" rel="noopener">Open</a>
+                        {% else %}
+                        —
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<nav class="pagination" aria-label="Markets pagination">
+    {% if previous_url %}
+    <a class="secondary-button" href="{{ previous_url }}">← Previous</a>
+    {% else %}
+    <span class="secondary-button disabled">← Previous</span>
+    {% endif %}
+
+    <span>Page {{ page }} of {{ total_pages }}</span>
+
+    {% if next_url %}
+    <a class="secondary-button" href="{{ next_url }}">Next →</a>
+    {% else %}
+    <span class="secondary-button disabled">Next →</span>
+    {% endif %}
+</nav>
+{% else %}
+<section class="info-panel">
+    <h2>No markets found</h2>
+    <p>Try a different search term or clear the platform filter.</p>
+</section>
+{% endif %}
+{% endblock %}
