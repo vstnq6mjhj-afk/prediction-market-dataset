@@ -13,8 +13,8 @@ import duckdb
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
-PARSER_VERSION = "semantic-v1.1-low-memory"
-BATCH_SIZE = 250
+PARSER_VERSION = "semantic-v1.2-ultra-low-memory"
+BATCH_SIZE = 50
 
 STOPWORDS = {
     "a", "an", "and", "are", "at", "be", "before", "by", "for", "from", "how",
@@ -534,47 +534,33 @@ def main() -> None:
     # Keep the parser stable on small Render instances.
     connection.execute("SET threads = 1")
     connection.execute("SET preserve_insertion_order = false")
-    connection.execute("SET memory_limit = '300MB'")
+    connection.execute("SET memory_limit = '128MB'")
     connection.execute(f"SET temp_directory = '{temp_dir.as_posix()}'")
 
     try:
-        print("[semantics] Building temporary latest-market table...")
-        connection.execute(
-            """
-            CREATE OR REPLACE TEMP TABLE latest_unique_markets AS
-            SELECT
-                platform,
-                market_id,
-                title,
-                category,
-                start_date,
-                close_date,
-                resolution_date,
-                status,
-                outcome,
-                resolution_source,
-                raw_url,
-                snapshot_time
-            FROM market_snapshots
-            WHERE market_id IS NOT NULL
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY platform, market_id
-                ORDER BY snapshot_time DESC
-            ) = 1
-            """
-        )
-
-        total_unique = connection.execute(
-            "SELECT COUNT(*) FROM latest_unique_markets"
-        ).fetchone()[0]
-        print(f"[semantics] Latest unique markets: {total_unique:,}")
-
-        processed = 0
-        offset = 0
-
-        while offset < total_unique:
-            batch_cursor = connection.execute(
+        platforms = [
+            row[0]
+            for row in connection.execute(
                 """
+                SELECT DISTINCT platform
+                FROM market_snapshots
+                WHERE platform IS NOT NULL
+                ORDER BY platform
+                """
+            ).fetchall()
+        ]
+
+        processed_total = 0
+
+        for platform_name in platforms:
+            safe_name = re.sub(r"[^a-z0-9_]", "_", str(platform_name).lower())
+            temp_table = f"latest_unique_{safe_name}"
+
+            print(f"[semantics] Building latest-market table for {platform_name}...")
+
+            connection.execute(
+                f"""
+                CREATE OR REPLACE TEMP TABLE {temp_table} AS
                 SELECT
                     platform,
                     market_id,
@@ -588,45 +574,95 @@ def main() -> None:
                     resolution_source,
                     raw_url,
                     snapshot_time
-                FROM latest_unique_markets
-                ORDER BY platform, market_id
-                LIMIT ? OFFSET ?
+                FROM market_snapshots
+                WHERE platform = ?
+                  AND market_id IS NOT NULL
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY market_id
+                    ORDER BY snapshot_time DESC
+                ) = 1
                 """,
-                [BATCH_SIZE, offset],
+                [platform_name],
             )
 
-            column_names = [item[0] for item in batch_cursor.description]
-            raw_batch = batch_cursor.fetchall()
-            if not raw_batch:
-                break
+            platform_total = connection.execute(
+                f"SELECT COUNT(*) FROM {temp_table}"
+            ).fetchone()[0]
 
-            records = [
-                dict(zip(column_names, raw_row))
-                for raw_row in raw_batch
-            ]
-            parsed_batch = [
-                parse_row(record).as_tuple()
-                for record in records
-            ]
+            print(
+                f"[semantics] {platform_name}: "
+                f"{platform_total:,} unique markets"
+            )
 
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.executemany(INSERT_SQL, parsed_batch)
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+            offset = 0
+            platform_processed = 0
 
-            processed += len(parsed_batch)
-            offset += len(parsed_batch)
-
-            if processed % 5_000 == 0 or processed == total_unique:
-                print(
-                    f"[semantics] processed {processed:,} / "
-                    f"{total_unique:,} unique markets"
+            while offset < platform_total:
+                batch_cursor = connection.execute(
+                    f"""
+                    SELECT
+                        platform,
+                        market_id,
+                        title,
+                        category,
+                        start_date,
+                        close_date,
+                        resolution_date,
+                        status,
+                        outcome,
+                        resolution_source,
+                        raw_url,
+                        snapshot_time
+                    FROM {temp_table}
+                    ORDER BY market_id
+                    LIMIT ? OFFSET ?
+                    """,
+                    [BATCH_SIZE, offset],
                 )
 
-        print(f"[semantics] Latest unique markets processed: {processed:,}")
+                column_names = [item[0] for item in batch_cursor.description]
+                raw_batch = batch_cursor.fetchall()
+                if not raw_batch:
+                    break
+
+                records = [
+                    dict(zip(column_names, raw_row))
+                    for raw_row in raw_batch
+                ]
+                parsed_batch = [
+                    parse_row(record).as_tuple()
+                    for record in records
+                ]
+
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    connection.executemany(INSERT_SQL, parsed_batch)
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+
+                batch_count = len(parsed_batch)
+                platform_processed += batch_count
+                processed_total += batch_count
+                offset += batch_count
+
+                if platform_processed % 2_500 == 0 or platform_processed == platform_total:
+                    print(
+                        f"[semantics] {platform_name}: processed "
+                        f"{platform_processed:,} / {platform_total:,}"
+                    )
+
+                # Encourage DuckDB to release reusable memory between insert batches.
+                connection.execute("CHECKPOINT")
+
+            connection.execute(f"DROP TABLE {temp_table}")
+            connection.execute("CHECKPOINT")
+
+        print(
+            f"[semantics] Latest unique markets processed: "
+            f"{processed_total:,}"
+        )
 
         summary = connection.execute(
             """
