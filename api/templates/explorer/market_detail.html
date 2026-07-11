@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact">
+    <p class="eyebrow">Historical market observations</p>
+    <h1>Market Detail</h1>
+    <p class="hero-copy">
+        Search the latest snapshot and open a market directly.
+        Historical detail loads immediately—there is no separate load button.
+    </p>
+</section>
+
+{% if error %}
+<section class="error-panel">
+    <strong>Market-detail query failed.</strong>
+    <p>{{ error }}</p>
+</section>
+{% endif %}
+
+{% if summary %}
+<a class="back-link detail-back-link" href="/explorer/market-detail?q={{ filters.q|urlencode }}">
+    ← Choose another market
+</a>
+
+<section class="market-detail-header">
+    <div>
+        <span class="platform-badge">{{ summary.platform_display }}</span>
+        <h2>{{ summary.title }}</h2>
+        <p>{{ summary.market_id }}</p>
+    </div>
+    <div class="mover-change {{ summary.price_direction }}">
+        <span>YES change</span>
+        <strong>{{ summary.price_change_display }}</strong>
+    </div>
+</section>
+
+<section class="metric-grid market-detail-metrics">
+    <article class="metric-card">
+        <span>Latest YES</span>
+        <strong>{{ summary.latest_yes_display }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Latest NO</span>
+        <strong>{{ summary.latest_no_display }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Observations</span>
+        <strong>{{ summary.observations }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Latest volume</span>
+        <strong>{{ summary.latest_volume_display }}</strong>
+    </article>
+</section>
+
+<section class="overview-section">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Historical probability</p>
+            <h2>YES price history</h2>
+        </div>
+        {% if summary.raw_url %}
+        <a class="secondary-button" href="{{ summary.raw_url }}" target="_blank" rel="noopener">
+            Open source
+        </a>
+        {% endif %}
+    </div>
+
+    {% if sparkline_points %}
+    <div class="sparkline-shell">
+        <svg viewBox="0 0 900 220" role="img" aria-label="YES price history">
+            <defs>
+                <linearGradient id="lineGradient" x1="0%" x2="100%">
+                    <stop offset="0%" stop-color="#22c55e"></stop>
+                    <stop offset="100%" stop-color="#06b6d4"></stop>
+                </linearGradient>
+            </defs>
+            <polyline
+                points="{{ sparkline_points }}"
+                fill="none"
+                stroke="url(#lineGradient)"
+                stroke-width="5"
+                stroke-linejoin="round"
+                stroke-linecap="round"
+            ></polyline>
+        </svg>
+    </div>
+    {% else %}
+    <p class="empty-state">Not enough price observations to draw a chart.</p>
+    {% endif %}
+
+    <div class="detail-summary-grid">
+        <div><span>Lowest YES</span><strong>{{ summary.low_yes_display }}</strong></div>
+        <div><span>Highest YES</span><strong>{{ summary.high_yes_display }}</strong></div>
+        <div><span>Volume change</span><strong>{{ summary.volume_change_display }}</strong></div>
+        <div><span>Latest liquidity</span><strong>{{ summary.latest_liquidity_display }}</strong></div>
+        <div><span>First snapshot</span><strong>{{ summary.first_snapshot_display }}</strong></div>
+        <div><span>Latest snapshot</span><strong>{{ summary.latest_snapshot_display }}</strong></div>
+    </div>
+</section>
+
+<section class="overview-section">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Latest loaded records</p>
+            <h2>Observation history</h2>
+        </div>
+        <span>Up to 300 observations</span>
+    </div>
+
+    <div class="table-shell">
+        <table class="markets-table">
+            <thead>
+                <tr>
+                    <th>Snapshot</th>
+                    <th>YES</th>
+                    <th>NO</th>
+                    <th>Volume</th>
+                    <th>Liquidity</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in history_rows %}
+                <tr>
+                    <td>{{ row.snapshot_display }}</td>
+                    <td class="yes-value">{{ row.yes_price_display }}</td>
+                    <td class="no-value">{{ row.no_price_display }}</td>
+                    <td>{{ row.volume_display }}</td>
+                    <td>{{ row.liquidity_display }}</td>
+                    <td>{{ row.status or "—" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% else %}
+<form class="filter-panel detail-search-panel" method="get" action="/explorer/market-detail">
+    <label>
+        <span>Search titles</span>
+        <input
+            type="search"
+            name="q"
+            value="{{ filters.q }}"
+            placeholder="bitcoin, election, football..."
+        >
+    </label>
+
+    <label>
+        <span>Platform</span>
+        <select name="platform">
+            <option value="">All platforms</option>
+            {% for item in platforms %}
+            <option value="{{ item }}" {% if item == filters.platform %}selected{% endif %}>
+                {{ item|title }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+
+    <button class="button filter-submit" type="submit">Search markets</button>
+    <a class="secondary-button" href="/explorer/market-detail">Clear</a>
+</form>
+
+<section class="detail-search-results">
+    {% for row in search_rows %}
+    <a class="detail-result-card" href="{{ row.detail_url }}">
+        <div>
+            <span class="platform-badge">{{ row.platform_display }}</span>
+            <h2>{{ row.title or "Untitled market" }}</h2>
+            <p>{{ row.market_id }}</p>
+        </div>
+        <div class="detail-result-stats">
+            <div><span>YES</span><strong>{{ row.yes_price_display }}</strong></div>
+            <div><span>Volume</span><strong>{{ row.volume_display }}</strong></div>
+            <div><span>Liquidity</span><strong>{{ row.liquidity_display }}</strong></div>
+        </div>
+    </a>
+    {% endfor %}
+</section>
+
+{% if not search_rows and not error %}
+<p class="empty-state">No markets matched the current search.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

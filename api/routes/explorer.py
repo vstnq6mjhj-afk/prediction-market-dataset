@@ -56,7 +56,7 @@ TOOLS = [
         "name": "Market Detail",
         "slug": "market-detail",
         "description": "Inspect historical observations for a selected market.",
-        "status": "Planned",
+        "status": "Live",
     },
     {
         "name": "Dataset Health",
@@ -537,6 +537,234 @@ def _movers_url(
     base = "/explorer/movers/export" if export else "/explorer/movers"
     return f"{base}?{urlencode(params)}"
 
+
+def _market_detail_search(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    search: str,
+    platform: str,
+    limit: int = 40,
+) -> List[Dict[str, Any]]:
+    latest_snapshot = _latest_snapshot(connection)
+    conditions = ["snapshot_time = ?"]
+    params: List[Any] = [latest_snapshot]
+
+    if search.strip():
+        conditions.append("LOWER(COALESCE(title, '')) LIKE ?")
+        params.append(f"%{search.strip().lower()}%")
+
+    if platform.strip():
+        conditions.append("LOWER(platform) = ?")
+        params.append(platform.strip().lower())
+
+    # Kalshi can remain searchable, but the page does not assume every field is populated.
+    where_sql = " AND ".join(conditions)
+
+    cursor = connection.execute(
+        f"""
+        SELECT
+            platform,
+            market_id,
+            title,
+            yes_price,
+            no_price,
+            volume,
+            liquidity,
+            status,
+            snapshot_time,
+            raw_url
+        FROM market_snapshots
+        WHERE {where_sql}
+          AND market_id IS NOT NULL
+        ORDER BY
+            COALESCE(volume, 0) DESC,
+            COALESCE(liquidity, 0) DESC,
+            title ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    )
+
+    rows = _rows_as_dicts(cursor)
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        output.append(
+            {
+                **row,
+                "platform_display": str(row.get("platform") or "Unknown").title(),
+                "yes_price_display": _display_price(row.get("yes_price")),
+                "no_price_display": _display_price(row.get("no_price")),
+                "volume_display": _display_number(row.get("volume")),
+                "liquidity_display": _display_number(row.get("liquidity")),
+                "snapshot_display": _display_datetime(row.get("snapshot_time")),
+                "detail_url": (
+                    "/explorer/market-detail?"
+                    + urlencode(
+                        {
+                            "platform": str(row.get("platform") or ""),
+                            "market_id": str(row.get("market_id") or ""),
+                            "q": search,
+                        }
+                    )
+                ),
+            }
+        )
+    return output
+
+
+def _market_history(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    platform: str,
+    market_id: str,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    cursor = connection.execute(
+        """
+        SELECT
+            snapshot_time,
+            platform,
+            market_id,
+            title,
+            yes_price,
+            no_price,
+            volume,
+            liquidity,
+            status,
+            raw_url
+        FROM market_snapshots
+        WHERE LOWER(platform) = LOWER(?)
+          AND market_id = ?
+        ORDER BY snapshot_time DESC
+        LIMIT ?
+        """,
+        [platform, market_id, limit],
+    )
+    rows = _rows_as_dicts(cursor)
+    rows.reverse()
+    return rows
+
+
+def _market_detail_summary(
+    history: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not history:
+        return {}
+
+    latest = history[-1]
+    first = history[0]
+
+    def to_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    first_yes = to_float(first.get("yes_price"))
+    latest_yes = to_float(latest.get("yes_price"))
+    price_change = (
+        latest_yes - first_yes
+        if first_yes is not None and latest_yes is not None
+        else None
+    )
+
+    first_volume = to_float(first.get("volume"))
+    latest_volume = to_float(latest.get("volume"))
+    volume_change = (
+        latest_volume - first_volume
+        if first_volume is not None and latest_volume is not None
+        else None
+    )
+
+    yes_values = [
+        to_float(item.get("yes_price"))
+        for item in history
+        if to_float(item.get("yes_price")) is not None
+    ]
+
+    return {
+        "platform": latest.get("platform"),
+        "platform_display": str(latest.get("platform") or "Unknown").title(),
+        "market_id": latest.get("market_id"),
+        "title": latest.get("title") or first.get("title") or "Untitled market",
+        "status": latest.get("status") or "unknown",
+        "raw_url": latest.get("raw_url"),
+        "observations": len(history),
+        "first_snapshot_display": _display_datetime(first.get("snapshot_time")),
+        "latest_snapshot_display": _display_datetime(latest.get("snapshot_time")),
+        "latest_yes_display": _display_price(latest_yes),
+        "latest_no_display": _display_price(latest.get("no_price")),
+        "latest_volume_display": _display_number(latest_volume),
+        "latest_liquidity_display": _display_number(latest.get("liquidity")),
+        "price_change_display": (
+            f"{price_change:+.1%}" if price_change is not None else "—"
+        ),
+        "price_direction": (
+            "positive"
+            if price_change is not None and price_change > 0
+            else "negative"
+            if price_change is not None and price_change < 0
+            else "neutral"
+        ),
+        "volume_change_display": _display_number(volume_change),
+        "low_yes_display": _display_price(min(yes_values)) if yes_values else "—",
+        "high_yes_display": _display_price(max(yes_values)) if yes_values else "—",
+    }
+
+
+def _decorate_market_history(
+    history: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for row in reversed(history):
+        output.append(
+            {
+                **row,
+                "snapshot_display": _display_datetime(row.get("snapshot_time")),
+                "yes_price_display": _display_price(row.get("yes_price")),
+                "no_price_display": _display_price(row.get("no_price")),
+                "volume_display": _display_number(row.get("volume")),
+                "liquidity_display": _display_number(row.get("liquidity")),
+            }
+        )
+    return output
+
+
+def _market_sparkline_points(
+    history: Sequence[Dict[str, Any]],
+    *,
+    width: int = 900,
+    height: int = 220,
+    padding: int = 16,
+) -> str:
+    values: List[float] = []
+    for row in history:
+        try:
+            value = float(row.get("yes_price"))
+        except (TypeError, ValueError):
+            continue
+        values.append(value)
+
+    if len(values) < 2:
+        return ""
+
+    min_value = min(values)
+    max_value = max(values)
+    value_range = max(max_value - min_value, 0.000001)
+    usable_width = width - (padding * 2)
+    usable_height = height - (padding * 2)
+
+    points: List[str] = []
+    denominator = max(len(values) - 1, 1)
+    for index, value in enumerate(values):
+        x = padding + (index / denominator) * usable_width
+        y = padding + ((max_value - value) / value_range) * usable_height
+        points.append(f"{x:.2f},{y:.2f}")
+
+    return " ".join(points)
+
 def _display_number(value: Any) -> str:
     if value is None:
         return "—"
@@ -989,6 +1217,65 @@ def export_movers(
             "Content-Disposition": (
                 f'attachment; filename="prediction_market_movers_{hours}h.csv"'
             )
+        },
+    )
+
+
+@router.get("/market-detail")
+def explorer_market_detail(
+    request: Request,
+    q: str = Query(default="", max_length=120),
+    platform: str = Query(default="", max_length=50),
+    market_id: str = Query(default="", max_length=500),
+):
+    error: Optional[str] = None
+    platforms: List[str] = []
+    search_rows: List[Dict[str, Any]] = []
+    summary: Dict[str, Any] = {}
+    history_rows: List[Dict[str, Any]] = []
+    sparkline_points = ""
+
+    try:
+        with _connect() as connection:
+            latest_snapshot = _latest_snapshot(connection)
+            platforms = _platforms(connection, latest_snapshot)
+
+            if platform and market_id:
+                history = _market_history(
+                    connection,
+                    platform=platform,
+                    market_id=market_id,
+                    limit=300,
+                )
+                summary = _market_detail_summary(history)
+                history_rows = _decorate_market_history(history)
+                sparkline_points = _market_sparkline_points(history)
+            else:
+                search_rows = _market_detail_search(
+                    connection,
+                    search=q,
+                    platform=platform,
+                    limit=40,
+                )
+    except Exception as exc:
+        error = str(exc)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/market_detail.html",
+        context={
+            "page_title": "Market Detail",
+            "platforms": platforms,
+            "search_rows": search_rows,
+            "summary": summary,
+            "history_rows": history_rows,
+            "sparkline_points": sparkline_points,
+            "error": error,
+            "filters": {
+                "q": q,
+                "platform": platform,
+                "market_id": market_id,
+            },
         },
     )
 
