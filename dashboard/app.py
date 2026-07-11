@@ -568,21 +568,22 @@ def render_movers() -> None:
 
 def render_matcher() -> None:
     st.title("Market Matcher")
-    st.caption("Compare likely equivalent live prediction markets across supported platform pairs. Weak matches are filtered out by shared-keyword and score rules.")
+    st.caption("Compare likely equivalent live prediction markets across all supported platform pairs.")
     back_to_menu()
 
     conn = open_db()
     try:
         st.sidebar.subheader("Matcher Filters")
-        min_match_score = st.sidebar.slider("Minimum match score", 0.30, 1.00, 0.60, 0.05)
+        min_match_score = st.sidebar.slider("Minimum match score", 0.10, 1.00, 0.35, 0.05)
         min_shared_terms = st.sidebar.slider("Minimum shared keywords", 1, 5, 2, 1)
         min_spread = st.sidebar.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
-        max_per_platform = st.sidebar.slider("Markets per platform", 20, 80, 40, 10)
-        keyword_focus = st.sidebar.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup")
+        max_per_platform = st.sidebar.slider("Markets per platform", 40, 250, 120, 20)
+        keyword_focus = st.sidebar.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup...")
 
         matcher_filter = ""
         if keyword_focus:
-            matcher_filter += f" AND LOWER(title) LIKE '%{safe_sql_text(keyword_focus.lower())}%'"
+            safe_keyword = safe_sql_text(keyword_focus.lower())
+            matcher_filter += f" AND LOWER(title) LIKE '%{safe_keyword}%'"
 
         latest = sql_df(
             conn,
@@ -622,6 +623,28 @@ def render_matcher() -> None:
             st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
             return
 
+        platforms_loaded = sorted([str(p).lower() for p in latest["platform"].dropna().unique()])
+        pair_options = ["All platform pairs"]
+        for i, left in enumerate(platforms_loaded):
+            for right in platforms_loaded[i + 1:]:
+                pair_options.append(f"{platform_badge(left)} ↔ {platform_badge(right)}")
+
+        selected_pair = st.selectbox("Platform pair", pair_options)
+        selected_pair_keys = None
+        if selected_pair != "All platform pairs":
+            left_label, right_label = [x.strip() for x in selected_pair.split("↔")]
+            reverse_badges = {platform_badge(p): p for p in platforms_loaded}
+            selected_pair_keys = {
+                reverse_badges.get(left_label, left_label.lower()),
+                reverse_badges.get(right_label, right_label.lower()),
+            }
+
+        platform_counts = latest.groupby("platform").size().reset_index(name="Markets loaded")
+        platform_counts["Platform"] = platform_counts["platform"].apply(platform_badge)
+        platform_counts = platform_counts[["Platform", "Markets loaded"]]
+        st.caption("Markets loaded into matcher")
+        show_df(platform_counts, height=180)
+
         rows = latest.to_dict("records")
         prepared = [{**row, "tokens": token_set(row.get("title"))} for row in rows]
 
@@ -634,25 +657,28 @@ def render_matcher() -> None:
                 if platform_a == platform_b:
                     continue
 
-                title_score = similarity(a.get("title"), b.get("title"))
-                token_score = jaccard(a.get("tokens", set()), b.get("tokens", set()))
-                overlap_terms = sorted(a.get("tokens", set()) & b.get("tokens", set()))
+                if selected_pair_keys and {platform_a, platform_b} != selected_pair_keys:
+                    continue
 
-                # Stricter matching:
-                # - Require actual shared keywords so broad political/event words do not create weak matches.
-                # - Weight shared-token overlap more than fuzzy sentence similarity.
-                # - Keep a small boost for multiple shared keywords.
+                title_a = a.get("title")
+                title_b = b.get("title")
+                tokens_a = a.get("tokens", set())
+                tokens_b = b.get("tokens", set())
+
+                title_score = similarity(title_a, title_b)
+                token_score = jaccard(tokens_a, tokens_b)
+                overlap_terms = sorted(tokens_a & tokens_b)
+
                 if len(overlap_terms) < min_shared_terms:
                     continue
 
-                if token_score < 0.20 and title_score < 0.72:
-                    continue
-
-                match_score = (0.75 * token_score) + (0.25 * title_score)
+                # This is the previous matcher scoring style, but with a minimum shared-keyword
+                # guard to remove the weakest false matches.
+                match_score = (0.60 * token_score) + (0.40 * title_score)
+                if len(overlap_terms) >= 2:
+                    match_score += 0.10
                 if len(overlap_terms) >= 3:
-                    match_score += 0.08
-                if len(overlap_terms) >= 4:
-                    match_score += 0.07
+                    match_score += 0.10
                 match_score = min(match_score, 1.0)
 
                 if match_score < min_match_score:
@@ -670,78 +696,122 @@ def render_matcher() -> None:
 
                 matches.append({
                     "platform_a": platform_a,
-                    "market_a": a.get("title"),
-                    "yes_a": price_a,
+                    "title_a": title_a,
+                    "price_a": price_a,
                     "platform_b": platform_b,
-                    "market_b": b.get("title"),
-                    "yes_b": price_b,
-                    "difference": spread,
+                    "title_b": title_b,
+                    "price_b": price_b,
+                    "price_difference": spread,
                     "match_score": match_score,
-                    "shared_terms": ", ".join(overlap_terms[:10]),
+                    "title_similarity": title_score,
+                    "token_overlap": token_score,
+                    "shared_terms": ", ".join(overlap_terms[:12]),
+                    "volume_a": a.get("volume"),
+                    "volume_b": b.get("volume"),
+                    "liquidity_a": a.get("liquidity"),
+                    "liquidity_b": b.get("liquidity"),
+                    "market_id_a": a.get("market_id"),
+                    "market_id_b": b.get("market_id"),
                     "url_a": a.get("raw_url"),
                     "url_b": b.get("raw_url"),
                 })
 
-        if not matches:
-            st.info("No strong matches found. Try lowering the match score, lowering shared keywords, or using a focused keyword.")
+        matches_df = pd.DataFrame(matches)
+        if matches_df.empty:
+            st.info(
+                "No matches found. Try lowering Minimum match score, reducing shared keywords, selecting All platform pairs, or using a focused keyword."
+            )
             return
 
-        matches = sorted(matches, key=lambda x: (x["match_score"], x["difference"]), reverse=True)[:80]
+        matches_df = matches_df.sort_values(
+            ["match_score", "price_difference"], ascending=False
+        ).head(200)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Potential Matches", f"{len(matches_df):,}")
+        c2.metric("Platform Pairs", f"{matches_df[['platform_a', 'platform_b']].drop_duplicates().shape[0]:,}")
+        c3.metric("Largest Difference", f"{matches_df['price_difference'].max() * 100:.2f}%")
+        c4.metric("Avg Match Score", f"{matches_df['match_score'].mean() * 100:.0f}%")
+
+        pair_summary = matches_df.copy()
+        pair_summary["Pair"] = pair_summary.apply(
+            lambda r: " ↔ ".join(sorted([platform_badge(r["platform_a"]), platform_badge(r["platform_b"])])),
+            axis=1,
+        )
+        pair_summary = (
+            pair_summary.groupby("Pair")
+            .agg(
+                Matches=("Pair", "count"),
+                Avg_Match=("match_score", "mean"),
+                Max_Difference=("price_difference", "max"),
+            )
+            .reset_index()
+            .sort_values("Matches", ascending=False)
+        )
+        pair_summary["Avg Match"] = pair_summary["Avg_Match"].map(lambda x: f"{x:.0%}")
+        pair_summary["Max Difference"] = pair_summary["Max_Difference"].map(lambda x: f"{x:.2%}")
+        st.subheader("Platform Pair Coverage")
+        show_df(pair_summary[["Pair", "Matches", "Avg Match", "Max Difference"]], height=220)
+
+        display = matches_df.copy()
+        display["Platform A"] = display["platform_a"].apply(platform_badge)
+        display["Platform B"] = display["platform_b"].apply(platform_badge)
+        display["Market A"] = display["title_a"]
+        display["Market B"] = display["title_b"]
+        display["YES A"] = display["price_a"].map(lambda x: f"{x:.2%}")
+        display["YES B"] = display["price_b"].map(lambda x: f"{x:.2%}")
+        display["Difference"] = display["price_difference"].map(lambda x: f"{x:.2%}")
+        display["Match Score"] = display["match_score"].map(lambda x: f"{x:.0%}")
+        display["Title Similarity"] = display["title_similarity"].map(lambda x: f"{x:.0%}")
+        display["Token Overlap"] = display["token_overlap"].map(lambda x: f"{x:.0%}")
+        display["Shared Terms"] = display["shared_terms"]
+        display["URL A"] = display["url_a"]
+        display["URL B"] = display["url_b"]
+
+        display_cols = [
+            "Platform A", "Market A", "YES A",
+            "Platform B", "Market B", "YES B",
+            "Difference", "Match Score", "Shared Terms",
+            "Title Similarity", "Token Overlap", "URL A", "URL B",
+        ]
 
         st.subheader("Matched Markets")
-        st.caption("Capped to 80 rows for stability. Use the sidebar filters to narrow results.")
-
-        table_rows = []
-        for m in matches:
-            table_rows.append({
-                "Platform A": platform_badge(m["platform_a"]),
-                "Market A": m["market_a"],
-                "YES A": f'{m["yes_a"]:.2%}',
-                "Platform B": platform_badge(m["platform_b"]),
-                "Market B": m["market_b"],
-                "YES B": f'{m["yes_b"]:.2%}',
-                "Difference": f'{m["difference"]:.2%}',
-                "Match Score": f'{m["match_score"]:.0%}',
-                "Shared Terms": m["shared_terms"],
-            })
-        results_df = pd.DataFrame(table_rows)
-        show_df(results_df, height=420)
+        show_df(display[display_cols], height=520)
 
         st.subheader("Match Cards")
-        for m in matches[:20]:
-            score_pct = int(round(m["match_score"] * 100))
-            difference_pct = f'{m["difference"]:.2%}'
-            yes_a = f'{m["yes_a"]:.2%}'
-            yes_b = f'{m["yes_b"]:.2%}'
+        for _, row in matches_df.head(20).iterrows():
+            score_pct = int(round(float(row["match_score"]) * 100))
+            difference_pct = f'{float(row["price_difference"]):.2%}'
+            yes_a = f'{float(row["price_a"]):.2%}'
+            yes_b = f'{float(row["price_b"]):.2%}'
             html = f"""
             <div class="matcher-row">
                 <div>
-                    <span class="platform-pill">{platform_logo(m["platform_a"])} {platform_badge(m["platform_a"])}</span>
-                    <span class="platform-pill">{platform_logo(m["platform_b"])} {platform_badge(m["platform_b"])}</span>
+                    <span class="platform-pill">{platform_logo(row["platform_a"])} {platform_badge(row["platform_a"])}</span>
+                    <span class="platform-pill">{platform_logo(row["platform_b"])} {platform_badge(row["platform_b"])}</span>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px;">
                     <div>
                         <div class="small-muted">Market A · YES {yes_a}</div>
-                        <strong>{m["market_a"]}</strong>
+                        <strong>{row["title_a"]}</strong>
                     </div>
                     <div>
                         <div class="small-muted">Market B · YES {yes_b}</div>
-                        <strong>{m["market_b"]}</strong>
+                        <strong>{row["title_b"]}</strong>
                     </div>
                 </div>
                 <div style="margin-top:12px;">
                     <strong>Match Score: {score_pct}%</strong>
-                    <span class="small-muted"> · Difference: {difference_pct} · Shared: {m["shared_terms"]}</span>
+                    <span class="small-muted"> · Difference: {difference_pct} · Shared: {row["shared_terms"]}</span>
                     <div class="score-bar"><div class="score-fill" style="width:{score_pct}%"></div></div>
                 </div>
             </div>
             """
             st.markdown(html, unsafe_allow_html=True)
 
-        csv_df = pd.DataFrame(matches)
         st.download_button(
             "Download matcher results CSV",
-            csv_df.to_csv(index=False),
+            matches_df.to_csv(index=False),
             file_name="prediction_market_matcher_results.csv",
             mime="text/csv",
         )
@@ -797,7 +867,9 @@ def render_market_detail() -> None:
         selected_platform_detail = selected_row["platform"]
         selected_market_id = selected_row["market_id"]
 
-        st.info("Market detail loads automatically when you choose a market.")
+        if not st.button("Load Market Detail", type="primary"):
+            st.info("Select a market, then click Load Market Detail.")
+            return
 
         history = sql_df(
             conn,
@@ -817,7 +889,7 @@ def render_market_detail() -> None:
             WHERE platform = ?
               AND market_id = ?
             ORDER BY snapshot_time DESC
-            LIMIT 200
+            LIMIT 250
             """,
             [selected_platform_detail, selected_market_id],
         )
