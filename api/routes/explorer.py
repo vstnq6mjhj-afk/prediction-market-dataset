@@ -26,7 +26,7 @@ TOOLS = [
         "name": "Dataset Overview",
         "slug": "overview",
         "description": "Warehouse totals, snapshot freshness, collection growth, and platform coverage.",
-        "status": "Next",
+        "status": "Live",
     },
     {
         "name": "Markets",
@@ -178,6 +178,101 @@ def _fetch_markets(
     cursor = connection.execute(query, [*params, limit, offset])
     return _rows_as_dicts(cursor), int(total)
 
+
+
+def _overview_stats(connection: duckdb.DuckDBPyConnection) -> Dict[str, Any]:
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS total_rows,
+            COUNT(DISTINCT market_id) AS unique_markets,
+            COUNT(DISTINCT snapshot_time) AS snapshots,
+            COUNT(DISTINCT platform) AS platforms,
+            MAX(snapshot_time) AS latest_snapshot
+        FROM market_snapshots
+        """
+    ).fetchone()
+
+    return {
+        "total_rows": int(row[0] or 0),
+        "unique_markets": int(row[1] or 0),
+        "snapshots": int(row[2] or 0),
+        "platforms": int(row[3] or 0),
+        "latest_snapshot": row[4],
+    }
+
+
+def _overview_growth(
+    connection: duckdb.DuckDBPyConnection,
+    limit: int = 40,
+) -> List[Dict[str, Any]]:
+    cursor = connection.execute(
+        """
+        SELECT
+            snapshot_time,
+            COUNT(*) AS rows
+        FROM market_snapshots
+        GROUP BY snapshot_time
+        ORDER BY snapshot_time DESC
+        LIMIT ?
+        """,
+        [limit],
+    )
+    rows = _rows_as_dicts(cursor)
+    rows.reverse()
+
+    max_rows = max((int(item.get("rows") or 0) for item in rows), default=1)
+    decorated: List[Dict[str, Any]] = []
+    for item in rows:
+        row_count = int(item.get("rows") or 0)
+        decorated.append(
+            {
+                "snapshot_time": _display_datetime(item.get("snapshot_time")),
+                "rows": row_count,
+                "rows_display": f"{row_count:,}",
+                "bar_width": max(3, round((row_count / max_rows) * 100, 2)),
+            }
+        )
+    return decorated
+
+
+def _overview_platforms(
+    connection: duckdb.DuckDBPyConnection,
+) -> List[Dict[str, Any]]:
+    cursor = connection.execute(
+        """
+        SELECT
+            platform,
+            COUNT(*) AS rows,
+            COUNT(DISTINCT market_id) AS unique_markets,
+            AVG(volume) AS avg_volume,
+            AVG(liquidity) AS avg_liquidity,
+            MIN(snapshot_time) AS first_snapshot,
+            MAX(snapshot_time) AS latest_snapshot
+        FROM market_snapshots
+        GROUP BY platform
+        ORDER BY rows DESC
+        """
+    )
+    rows = _rows_as_dicts(cursor)
+    max_rows = max((int(item.get("rows") or 0) for item in rows), default=1)
+
+    decorated: List[Dict[str, Any]] = []
+    for item in rows:
+        row_count = int(item.get("rows") or 0)
+        decorated.append(
+            {
+                **item,
+                "rows_display": f"{row_count:,}",
+                "unique_markets_display": f"{int(item.get('unique_markets') or 0):,}",
+                "avg_volume_display": _display_number(item.get("avg_volume")),
+                "avg_liquidity_display": _display_number(item.get("avg_liquidity")),
+                "first_snapshot_display": _display_datetime(item.get("first_snapshot")),
+                "latest_snapshot_display": _display_datetime(item.get("latest_snapshot")),
+                "bar_width": max(3, round((row_count / max_rows) * 100, 2)),
+            }
+        )
+    return decorated
 
 def _display_number(value: Any) -> str:
     if value is None:
@@ -432,6 +527,47 @@ def export_markets_page(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
+
+
+@router.get("/overview")
+def explorer_overview(request: Request):
+    error: Optional[str] = None
+    stats: Dict[str, Any] = {
+        "total_rows": 0,
+        "unique_markets": 0,
+        "snapshots": 0,
+        "platforms": 0,
+        "latest_snapshot": None,
+    }
+    growth: List[Dict[str, Any]] = []
+    platform_rows: List[Dict[str, Any]] = []
+
+    try:
+        with _connect() as connection:
+            stats = _overview_stats(connection)
+            growth = _overview_growth(connection)
+            platform_rows = _overview_platforms(connection)
+    except Exception as exc:
+        error = str(exc)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/overview.html",
+        context={
+            "page_title": "Dataset Overview",
+            "stats": {
+                **stats,
+                "total_rows_display": f"{int(stats.get('total_rows') or 0):,}",
+                "unique_markets_display": f"{int(stats.get('unique_markets') or 0):,}",
+                "snapshots_display": f"{int(stats.get('snapshots') or 0):,}",
+                "platforms_display": f"{int(stats.get('platforms') or 0):,}",
+                "latest_snapshot_display": _display_datetime(stats.get("latest_snapshot")),
+            },
+            "growth": growth,
+            "platform_rows": platform_rows,
+            "error": error,
+        },
+    )
 
 @router.get("/{tool_slug}")
 def explorer_placeholder(request: Request, tool_slug: str):

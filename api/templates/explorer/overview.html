@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact">
+    <p class="eyebrow">Live warehouse summary</p>
+    <h1>Dataset Overview</h1>
+    <p class="hero-copy">
+        A lightweight view of the central prediction-market warehouse.
+        Only summary queries are run on this page.
+    </p>
+</section>
+
+{% if error %}
+<section class="error-panel">
+    <strong>Dataset query failed.</strong>
+    <p>{{ error }}</p>
+</section>
+{% endif %}
+
+<section class="metric-grid">
+    <article class="metric-card">
+        <span>Total rows</span>
+        <strong>{{ stats.total_rows_display }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Unique markets</span>
+        <strong>{{ stats.unique_markets_display }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Snapshots</span>
+        <strong>{{ stats.snapshots_display }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Platforms</span>
+        <strong>{{ stats.platforms_display }}</strong>
+    </article>
+</section>
+
+<section class="freshness-panel">
+    <div>
+        <p class="eyebrow">Dataset freshness</p>
+        <h2>Latest warehouse snapshot</h2>
+    </div>
+    <strong>{{ stats.latest_snapshot_display }}</strong>
+</section>
+
+<section class="overview-section">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Recent collection activity</p>
+            <h2>Snapshot growth</h2>
+        </div>
+        <span>{{ growth|length }} recent snapshots</span>
+    </div>
+
+    {% if growth %}
+    <div class="growth-chart" aria-label="Recent snapshot row counts">
+        {% for item in growth %}
+        <div class="growth-column" title="{{ item.snapshot_time }} — {{ item.rows_display }} rows">
+            <div class="growth-bar" style="height: {{ item.bar_width }}%"></div>
+        </div>
+        {% endfor %}
+    </div>
+    <div class="chart-caption">
+        <span>{{ growth[0].snapshot_time }}</span>
+        <span>{{ growth[-1].snapshot_time }}</span>
+    </div>
+    {% else %}
+    <p class="empty-state">No snapshot history is available.</p>
+    {% endif %}
+</section>
+
+<section class="overview-section">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Warehouse coverage</p>
+            <h2>Platforms</h2>
+        </div>
+        <span>{{ platform_rows|length }} platforms</span>
+    </div>
+
+    <div class="platform-overview-grid">
+        {% for row in platform_rows %}
+        <article class="platform-overview-card">
+            <div class="platform-card-heading">
+                <h3>{{ row.platform|title }}</h3>
+                <strong>{{ row.rows_display }} rows</strong>
+            </div>
+            <div class="coverage-track">
+                <div class="coverage-fill" style="width: {{ row.bar_width }}%"></div>
+            </div>
+            <dl class="platform-stats">
+                <div>
+                    <dt>Unique markets</dt>
+                    <dd>{{ row.unique_markets_display }}</dd>
+                </div>
+                <div>
+                    <dt>Average volume</dt>
+                    <dd>{{ row.avg_volume_display }}</dd>
+                </div>
+                <div>
+                    <dt>Average liquidity</dt>
+                    <dd>{{ row.avg_liquidity_display }}</dd>
+                </div>
+                <div>
+                    <dt>Latest snapshot</dt>
+                    <dd>{{ row.latest_snapshot_display }}</dd>
+                </div>
+            </dl>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}
