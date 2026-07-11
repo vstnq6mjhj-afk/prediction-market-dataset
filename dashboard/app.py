@@ -9,7 +9,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from streamlit_autorefresh import st_autorefresh
+# Auto-refresh disabled for Render stability
 
 # =========================
 # Configuration
@@ -28,7 +28,7 @@ API_BASE_URL = os.getenv(
 )
 
 st.set_page_config(page_title="Prediction Market Dataset Explorer", layout="wide")
-st_autorefresh(interval=60 * 1000, limit=None, key="live_dashboard_refresh")
+# st_autorefresh(interval=60 * 1000, limit=None, key="live_dashboard_refresh")
 
 # =========================
 # Helpers
@@ -43,7 +43,16 @@ def get_query_param(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def open_db() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(DB_PATH, read_only=True)
+    """Open DuckDB in a conservative single-threaded mode for Render stability."""
+    try:
+        return duckdb.connect(DB_PATH, read_only=True, config={"threads": "1"})
+    except TypeError:
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        try:
+            conn.execute("PRAGMA threads=1")
+        except Exception:
+            pass
+        return conn
 
 
 def sql_df(
@@ -52,12 +61,13 @@ def sql_df(
     params: Optional[Iterable[Any]] = None,
 ) -> pd.DataFrame:
     if params is None:
-        return conn.execute(query).df()
-    return conn.execute(query, list(params)).df()
+        return conn.execute(query).df().copy()
+    return conn.execute(query, list(params)).df().copy()
 
 
 def show_df(df: pd.DataFrame) -> None:
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    # width="stretch" avoids repeated Streamlit deprecation warnings and keeps tables responsive.
+    st.dataframe(df, width="stretch", hide_index=True)
 
 
 def safe_sql_text(value: str) -> str:
@@ -248,14 +258,14 @@ try:
             {where_clause}
             GROUP BY snapshot_time
             ORDER BY snapshot_time DESC
-            LIMIT 300
+            LIMIT 120
             """,
         )
         if not growth.empty:
             growth["snapshot_time"] = pd.to_datetime(growth["snapshot_time"])
             growth = growth.sort_values("snapshot_time")
             fig = px.line(growth, x="snapshot_time", y="rows", markers=True, title="Rows Collected Over Recent Snapshots")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         st.subheader("Platform Coverage")
         platform_stats = sql_df(
@@ -279,9 +289,9 @@ try:
 
         if not platform_stats.empty:
             fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
-            st.plotly_chart(fig_rows, use_container_width=True)
+            st.plotly_chart(fig_rows, width="stretch")
             fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
-            st.plotly_chart(fig_unique, use_container_width=True)
+            st.plotly_chart(fig_unique, width="stretch")
 
     elif page == "Markets":
         st.subheader("Latest Top Volume Markets")
@@ -308,7 +318,7 @@ try:
             WHERE 1=1
             {latest_filter}
             ORDER BY volume DESC NULLS LAST
-            LIMIT 300
+            LIMIT 120
             """,
         )
         show_df(top_volume)
@@ -341,9 +351,9 @@ try:
         show_df(platform_stats)
         if not platform_stats.empty:
             fig_rows = px.bar(platform_stats, x="platform", y="rows", title="Rows By Platform")
-            st.plotly_chart(fig_rows, use_container_width=True)
+            st.plotly_chart(fig_rows, width="stretch")
             fig_unique = px.bar(platform_stats, x="platform", y="unique_markets", title="Unique Markets By Platform")
-            st.plotly_chart(fig_unique, use_container_width=True)
+            st.plotly_chart(fig_unique, width="stretch")
 
     elif page == "Movers":
         st.subheader("Market Movers")
@@ -381,7 +391,7 @@ try:
             SELECT *
             FROM market_changes
             ORDER BY ABS(price_change) DESC NULLS LAST
-            LIMIT 100
+            LIMIT 75
             """,
         )
         display_cols = [
@@ -413,8 +423,12 @@ try:
 
         min_match_score = st.slider("Minimum match score", 0.10, 1.00, 0.30, 0.05)
         min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
-        max_per_platform = st.slider("Markets per platform", 100, 800, 350, 50)
+        max_per_platform = st.slider("Markets per platform", 50, 200, 100, 25)
         keyword_focus = st.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup...")
+
+        if not st.button("Run Market Matcher", type="primary"):
+            st.info("Choose filters, then click Run Market Matcher. This keeps the explorer stable on Render.")
+            st.stop()
 
         matcher_filter = latest_filter
         if keyword_focus:
@@ -575,7 +589,7 @@ try:
             else:
                 matches_df = matches_df.sort_values(
                     ["match_score", "price_difference"], ascending=False
-                ).head(250)
+                ).head(100)
 
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Potential Matches", f"{len(matches_df):,}")
@@ -624,23 +638,15 @@ try:
                     "Difference", "Match Score", "Shared Terms",
                     "Title Similarity", "Token Overlap", "URL A", "URL B",
                 ]
-                styled_display = display[display_cols].style.format({
-                    "YES A": "{:.2%}",
-                    "YES B": "{:.2%}",
-                    "Difference": "{:.2%}",
-                    "Match Score": "{:.0%}",
-                    "Title Similarity": "{:.0%}",
-                    "Token Overlap": "{:.0%}",
-                }).background_gradient(
-                    subset=["Match Score"], cmap="RdYlGn", vmin=0, vmax=1
-                ).background_gradient(
-                    subset=["Difference"], cmap="Greens", vmin=0, vmax=max(float(display["Difference"].max()), 0.01)
-                ).background_gradient(
-                    subset=["Title Similarity", "Token Overlap"], cmap="RdYlGn", vmin=0, vmax=1
-                )
+                display_table = display[display_cols].copy()
+                for col in ["YES A", "YES B", "Difference"]:
+                    display_table[col] = display_table[col].map(lambda x: f"{float(x):.2%}" if pd.notna(x) else "")
+                for col in ["Match Score", "Title Similarity", "Token Overlap"]:
+                    display_table[col] = display_table[col].map(lambda x: f"{float(x):.0%}" if pd.notna(x) else "")
 
                 st.subheader("Matched Markets")
-                st.dataframe(styled_display, use_container_width=True, hide_index=True)
+                st.caption("Color gradients are disabled on Render for stability. Scores are still shown as percentages.")
+                st.dataframe(display_table, width="stretch", hide_index=True)
 
                 st.download_button(
                     "Download matcher results CSV",
@@ -665,7 +671,7 @@ try:
                     color_continuous_scale="RdYlGn",
                     labels={"price_difference_pct": "Price Difference (%)", "match_score": "Match Score"},
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     elif page == "Market Detail":
         st.subheader("Market Detail")
@@ -690,7 +696,7 @@ try:
             {market_detail_filter}
             GROUP BY platform, market_id
             ORDER BY latest_snapshot DESC
-            LIMIT 1000
+            LIMIT 500
             """,
         )
 
@@ -729,7 +735,7 @@ try:
                     WHERE platform = ?
                       AND market_id = ?
                     ORDER BY snapshot_time DESC
-                    LIMIT 1000
+                    LIMIT 500
                 )
                 ORDER BY snapshot_time
                 """,
@@ -751,19 +757,19 @@ try:
                 price_df = history.dropna(subset=["yes_price"])
                 if not price_df.empty:
                     fig_price = px.line(price_df, x="snapshot_time", y="yes_price", markers=True, title="YES Price History")
-                    st.plotly_chart(fig_price, use_container_width=True)
+                    st.plotly_chart(fig_price, width="stretch")
 
                 st.subheader("Volume History")
                 volume_df = history.dropna(subset=["volume"])
                 if not volume_df.empty:
                     fig_volume = px.bar(volume_df, x="snapshot_time", y="volume", title="Volume History")
-                    st.plotly_chart(fig_volume, use_container_width=True)
+                    st.plotly_chart(fig_volume, width="stretch")
 
                 st.subheader("Liquidity History")
                 liquidity_df = history.dropna(subset=["liquidity"])
                 if not liquidity_df.empty:
                     fig_liquidity = px.area(liquidity_df, x="snapshot_time", y="liquidity", title="Liquidity History")
-                    st.plotly_chart(fig_liquidity, use_container_width=True)
+                    st.plotly_chart(fig_liquidity, width="stretch")
 
                 st.download_button(
                     "Download Market CSV",
@@ -797,10 +803,10 @@ try:
             col1, col2 = st.columns(2)
             with col1:
                 fig_rows = px.bar(health, x="platform", y="total_rows", title="Rows By Platform")
-                st.plotly_chart(fig_rows, use_container_width=True)
+                st.plotly_chart(fig_rows, width="stretch")
             with col2:
                 fig_markets = px.bar(health, x="platform", y="total_markets", title="Markets By Platform")
-                st.plotly_chart(fig_markets, use_container_width=True)
+                st.plotly_chart(fig_markets, width="stretch")
 
     elif page == "API":
         st.subheader("Prediction Market Dataset API")
