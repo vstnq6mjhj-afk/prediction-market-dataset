@@ -776,6 +776,48 @@ MATCH_STOPWORDS = {
 }
 
 
+GENERIC_EVENT_TERMS = {
+    "world", "cup", "fifa", "uefa", "election", "nomination", "presidential",
+    "democratic", "republican", "final", "finals", "tournament", "championship",
+    "league", "season", "regular", "time", "million", "billion", "year",
+    "2025", "2026", "2027", "2028", "2029", "2030",
+}
+
+
+def _match_intent_family(value: Any) -> str:
+    text = str(value or "").lower()
+
+    if any(term in text for term in ("wikipedia", "pageview", "page view", "visits", "downloads")):
+        return "web_metric"
+
+    if any(term in text for term in ("beat ", "beats ", "defeat ", "defeats ", " vs ", " versus ", "regular time")):
+        return "head_to_head"
+
+    if "nomination" in text:
+        return "nomination"
+
+    if "election" in text and any(term in text for term in (" win ", "winner", "elected", "become president")):
+        return "election_winner"
+
+    if any(term in text for term in ("world cup", "championship", "tournament", "league")) and any(
+        term in text for term in (" win ", "wins ", "winner")
+    ):
+        return "outright_winner"
+
+    if any(term in text for term in ("above", "below", "exceed", "at least", "more than", "less than")):
+        return "threshold"
+
+    return "unknown"
+
+
+def _core_match_tokens(value: Any) -> set:
+    return {
+        token
+        for token in _match_tokens(value)
+        if token not in GENERIC_EVENT_TERMS
+    }
+
+
 def _normalize_match_title(value: Any) -> str:
     text = str(value or "").lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -855,6 +897,8 @@ def _match_markets(
             **row,
             "_normalized": _normalize_match_title(row.get("title")),
             "_tokens": _match_tokens(row.get("title")),
+            "_core_tokens": _core_match_tokens(row.get("title")),
+            "_intent_family": _match_intent_family(row.get("title")),
         }
         for row in left_rows
     ]
@@ -863,6 +907,8 @@ def _match_markets(
             **row,
             "_normalized": _normalize_match_title(row.get("title")),
             "_tokens": _match_tokens(row.get("title")),
+            "_core_tokens": _core_match_tokens(row.get("title")),
+            "_intent_family": _match_intent_family(row.get("title")),
         }
         for row in right_rows
     ]
@@ -871,8 +917,26 @@ def _match_markets(
 
     for left in prepared_left:
         for right in prepared_right:
+            # Reject clearly different market types, such as:
+            # tournament winner vs one match, election winner vs nomination,
+            # or sports outcomes vs page-view thresholds.
+            left_family = left["_intent_family"]
+            right_family = right["_intent_family"]
+            if (
+                left_family != "unknown"
+                and right_family != "unknown"
+                and left_family != right_family
+            ):
+                continue
+
             shared_terms = sorted(left["_tokens"] & right["_tokens"])
             if len(shared_terms) < minimum_shared_terms:
+                continue
+
+            # At least one meaningful entity/subject must overlap after removing
+            # generic terms such as "world", "cup", "fifa", and years.
+            shared_core_terms = sorted(left["_core_tokens"] & right["_core_tokens"])
+            if not shared_core_terms:
                 continue
 
             token_score = _jaccard(left["_tokens"], right["_tokens"])
@@ -922,6 +986,10 @@ def _match_markets(
                     "score": score,
                     "price_difference": price_difference,
                     "shared_terms": shared_terms,
+                    "shared_core_terms": shared_core_terms,
+                    "intent_family": (
+                        left_family if left_family != "unknown" else right_family
+                    ),
                 }
             )
 
@@ -959,7 +1027,7 @@ def _decorate_match_rows(
                 ),
                 "score_display": f"{score:.0%}",
                 "score_width": round(score * 100, 1),
-                "shared_terms_display": ", ".join(row.get("shared_terms") or []),
+                "shared_terms_display": ", ".join(row.get("shared_core_terms") or row.get("shared_terms") or []),
             }
         )
     return output
@@ -1651,6 +1719,8 @@ def export_matcher(
         "score",
         "price_difference",
         "shared_terms",
+        "shared_core_terms",
+        "intent_family",
         "url_a",
         "url_b",
     ]
@@ -1659,6 +1729,7 @@ def export_matcher(
     for row in rows:
         csv_row = dict(row)
         csv_row["shared_terms"] = ", ".join(row.get("shared_terms") or [])
+        csv_row["shared_core_terms"] = ", ".join(row.get("shared_core_terms") or [])
         writer.writerow(
             {key: _safe_csv_value(csv_row.get(key)) for key in fieldnames}
         )
