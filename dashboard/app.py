@@ -867,9 +867,7 @@ def render_market_detail() -> None:
         selected_platform_detail = selected_row["platform"]
         selected_market_id = selected_row["market_id"]
 
-        if not st.button("Load Market Detail", type="primary"):
-            st.info("Select a market, then click Load Market Detail.")
-            return
+        st.info("Market detail loads automatically when you choose a market.")
 
         history = sql_df(
             conn,
