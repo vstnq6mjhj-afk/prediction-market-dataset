@@ -1,3 +1,4 @@
+
 import os
 import re
 from difflib import SequenceMatcher
@@ -9,12 +10,15 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-# Ultra-stable Streamlit explorer for Render
-# - No Plotly
-# - No autorefresh
-# - Small query limits
-# - Heavy matcher only runs when clicked
-# - Conservative DuckDB read settings
+# ============================================================
+# Prediction Market Dataset Explorer
+# Tool-menu version
+#
+# Main change:
+# - Opening the Dataset Explorer now shows a tool menu first.
+# - DuckDB is not opened until the user chooses a specific tool.
+# - Heavy tools like Market Matcher only run after pressing a button.
+# ============================================================
 
 load_dotenv()
 
@@ -36,6 +40,11 @@ def get_query_param(name: str, default: Optional[str] = None) -> Optional[str]:
     if isinstance(value, list):
         return value[0] if value else default
     return value
+
+
+def set_tool(tool_name: str) -> None:
+    st.query_params["tool"] = tool_name
+    st.rerun()
 
 
 def open_db() -> duckdb.DuckDBPyConnection:
@@ -111,6 +120,7 @@ def validate_api_key(api_key: str) -> Optional[Dict[str, Any]]:
     api_key = str(api_key or "").strip()
     if not api_key:
         return None
+
     try:
         response = requests.get(
             f"{API_BASE_URL}/v1/account",
@@ -124,114 +134,187 @@ def validate_api_key(api_key: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-query_api_key = get_query_param("api_key")
-if query_api_key:
-    st.session_state["pmd_api_key"] = query_api_key
+def account_gate() -> tuple[Optional[Dict[str, Any]], str, bool, bool]:
+    query_api_key = get_query_param("api_key")
+    if query_api_key:
+        st.session_state["pmd_api_key"] = query_api_key
 
-stored_api_key = st.session_state.get("pmd_api_key", "")
-account_status = validate_api_key(stored_api_key) if stored_api_key else None
+    stored_api_key = st.session_state.get("pmd_api_key", "")
+    account_status = validate_api_key(stored_api_key) if stored_api_key else None
 
-is_active_subscription = bool(
-    account_status
-    and str(account_status.get("subscription_status", "free")).lower() == "active"
-)
-current_plan = str(account_status.get("plan", "free")).lower() if account_status else "free"
-is_professional = is_active_subscription and current_plan == "professional"
-
-st.title("Prediction Market Dataset Explorer")
-st.caption("Live cross-platform prediction market data warehouse")
-
-with st.sidebar:
-    st.subheader("Account")
-    st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
-    st.link_button("Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
-    st.link_button("API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
-    st.caption("Signup, login, subscriptions, billing, API keys, and usage are managed in the main customer portal.")
-
-    if account_status:
-        st.success(account_status.get("email", "Account connected"))
-        st.write(f"Plan: **{current_plan.upper()}**")
-        st.write(f"Status: **{account_status.get('subscription_status', 'free')}**")
-    else:
-        st.warning("No valid API key connected.")
-
-    entered_key = st.text_input(
-        "API key",
-        value=stored_api_key,
-        type="password",
-        help="Open this from the customer dashboard or paste your API key here.",
+    is_active_subscription = bool(
+        account_status
+        and str(account_status.get("subscription_status", "free")).lower() == "active"
     )
-    if entered_key and entered_key != stored_api_key:
-        st.session_state["pmd_api_key"] = entered_key.strip()
-        st.rerun()
+    current_plan = str(account_status.get("plan", "free")).lower() if account_status else "free"
+    is_professional = is_active_subscription and current_plan == "professional"
 
-    if st.button("Clear API key"):
-        st.session_state.pop("pmd_api_key", None)
-        st.rerun()
+    return account_status, current_plan, is_active_subscription, is_professional
 
-    st.divider()
-    page = st.radio(
-        "Navigation",
-        [
-            "Dashboard",
-            "Markets",
-            "Platforms",
-            "Movers",
-            "Market Matcher",
-            "Market Detail",
-            "Health",
-            "API",
-        ],
+
+def sidebar(account_status: Optional[Dict[str, Any]], current_plan: str) -> None:
+    with st.sidebar:
+        st.subheader("Account")
+        st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
+        st.link_button("Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
+        st.link_button("API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
+
+        st.caption(
+            "Signup, login, subscriptions, billing, API keys, and usage are managed in the main customer portal."
+        )
+
+        if account_status:
+            st.success(account_status.get("email", "Account connected"))
+            st.write(f"Plan: **{current_plan.upper()}**")
+            st.write(f"Status: **{account_status.get('subscription_status', 'free')}**")
+        else:
+            st.warning("No valid API key connected.")
+
+        stored_api_key = st.session_state.get("pmd_api_key", "")
+        entered_key = st.text_input(
+            "API key",
+            value=stored_api_key,
+            type="password",
+            help="Open this from the customer dashboard or paste your API key here.",
+        )
+        if entered_key and entered_key != stored_api_key:
+            st.session_state["pmd_api_key"] = entered_key.strip()
+            st.rerun()
+
+        if st.button("Clear API key"):
+            st.session_state.pop("pmd_api_key", None)
+            st.rerun()
+
+        st.divider()
+        st.subheader("Dataset Tools")
+        tool_links = [
+            ("Tool Menu", "menu"),
+            ("Dataset Overview", "overview"),
+            ("Markets", "markets"),
+            ("Platforms", "platforms"),
+            ("Movers", "movers"),
+            ("Market Matcher", "matcher"),
+            ("Market Detail", "market-detail"),
+            ("Dataset Health", "health"),
+            ("API Reference", "api"),
+        ]
+
+        current_tool = get_query_param("tool", "menu")
+        for label, value in tool_links:
+            if st.button(label, key=f"nav_{value}", use_container_width=True, disabled=(current_tool == value)):
+                set_tool(value)
+
+
+def build_filters(conn: duckdb.DuckDBPyConnection, exclude_kalshi: bool = False) -> tuple[str, str, str, str]:
+    platform_filter_sql = "AND LOWER(platform) <> 'kalshi'" if exclude_kalshi else ""
+
+    try:
+        platforms_df = sql_df(
+            conn,
+            f"""
+            SELECT DISTINCT platform
+            FROM market_snapshots
+            WHERE platform IS NOT NULL
+            {platform_filter_sql}
+            ORDER BY platform
+            """,
+        )
+        platforms = ["All"] + platforms_df["platform"].dropna().astype(str).tolist()
+    except Exception:
+        platforms = ["All"]
+
+    with st.sidebar:
+        selected_platform = st.selectbox("Platform", platforms)
+        search = st.text_input("Search Markets")
+
+    filters = []
+    if selected_platform != "All":
+        filters.append(f"platform = '{safe_sql_text(selected_platform)}'")
+    if search:
+        filters.append(f"LOWER(title) LIKE '%{safe_sql_text(search.lower())}%'")
+    if exclude_kalshi:
+        filters.append("LOWER(platform) <> 'kalshi'")
+
+    where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+    latest_filter = "AND " + " AND ".join(filters) if filters else ""
+
+    return selected_platform, search, where_clause, latest_filter
+
+
+def render_tool_menu(is_professional: bool) -> None:
+    st.title("Prediction Market Dataset Explorer")
+    st.caption("Choose a dataset tool. Nothing heavy loads until you select a tool.")
+
+    st.write(
+        "This explorer is a gateway into the prediction market dataset. "
+        "Select the workflow you want to use below."
     )
 
-if not is_active_subscription:
-    st.warning("A paid subscription is required to access the Dataset Explorer.")
-    st.write("Use the main customer portal to choose a plan, then open the Dataset Explorer from your customer dashboard.")
-    st.link_button("Go to Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
-    st.stop()
+    tools = [
+        {
+            "title": "Dataset Overview",
+            "tool": "overview",
+            "body": "Live warehouse totals, latest snapshot, recent collection growth, and platform coverage.",
+        },
+        {
+            "title": "Markets",
+            "tool": "markets",
+            "body": "Browse the latest top-volume markets across supported platforms.",
+        },
+        {
+            "title": "Platforms",
+            "tool": "platforms",
+            "body": "Compare platform-level rows, unique markets, volume, liquidity, and freshness.",
+        },
+        {
+            "title": "Movers",
+            "tool": "movers",
+            "body": "Inspect markets with the largest recent YES-price, volume, and liquidity changes.",
+        },
+        {
+            "title": "Market Matcher",
+            "tool": "matcher",
+            "body": "Professional tool for comparing likely equivalent markets across platforms.",
+        },
+        {
+            "title": "Market Detail",
+            "tool": "market-detail",
+            "body": "Select a specific market and inspect historical observations and price history.",
+        },
+        {
+            "title": "Dataset Health",
+            "tool": "health",
+            "body": "Check coverage, first/latest snapshots, and platform-level data quality summary.",
+        },
+        {
+            "title": "API Reference",
+            "tool": "api",
+            "body": "View useful REST endpoints and links back to the main API docs and examples.",
+        },
+    ]
 
-if page == "Market Matcher" and not is_professional:
-    st.warning("Market Matcher is included in the Professional plan.")
-    st.write("Developer subscribers still have access to the core dataset explorer, API docs, market search, movers, and market detail pages.")
-    st.link_button("Upgrade to Professional", f"{ACCOUNT_PORTAL_URL}/pricing")
-    st.stop()
+    cols = st.columns(2)
+    for i, item in enumerate(tools):
+        with cols[i % 2]:
+            with st.container(border=True):
+                st.subheader(item["title"])
+                st.write(item["body"])
+                if item["tool"] == "matcher" and not is_professional:
+                    st.caption("Requires Professional plan.")
+                    st.link_button("Upgrade to Professional", f"{ACCOUNT_PORTAL_URL}/pricing")
+                else:
+                    if st.button(f"Open {item['title']}", key=f"open_{item['tool']}", use_container_width=True):
+                        set_tool(item["tool"])
 
-conn = open_db()
 
-try:
-    platform_filter_sql = ""
-    if page == "Market Detail":
-        platform_filter_sql = "AND LOWER(platform) <> 'kalshi'"
+def render_overview() -> None:
+    st.title("Dataset Overview")
+    st.caption("Lightweight live summary of the warehouse.")
 
-    platforms_df = sql_df(
-        conn,
-        f"""
-        SELECT DISTINCT platform
-        FROM market_snapshots
-        WHERE platform IS NOT NULL
-        {platform_filter_sql}
-        ORDER BY platform
-        """,
-    )
-    platforms = ["All"] + platforms_df["platform"].dropna().astype(str).tolist()
-except Exception:
-    platforms = ["All"]
+    conn = open_db()
+    try:
+        _, _, where_clause, _ = build_filters(conn)
 
-with st.sidebar:
-    selected_platform = st.selectbox("Platform", platforms)
-    search = st.text_input("Search Markets")
-
-filters = []
-if selected_platform != "All":
-    filters.append(f"platform = '{safe_sql_text(selected_platform)}'")
-if search:
-    filters.append(f"LOWER(title) LIKE '%{safe_sql_text(search.lower())}%'")
-
-where_clause = "WHERE " + " AND ".join(filters) if filters else ""
-latest_filter = "AND " + " AND ".join(filters) if filters else ""
-
-try:
-    if page == "Dashboard":
         stats = conn.execute(
             f"""
             SELECT
@@ -291,9 +374,18 @@ try:
         if not platform_stats.empty:
             st.subheader("Rows By Platform")
             st.bar_chart(platform_stats[["platform", "rows"]].set_index("platform"), use_container_width=True)
+    finally:
+        conn.close()
 
-    elif page == "Markets":
-        st.subheader("Latest Top Volume Markets")
+
+def render_markets() -> None:
+    st.title("Markets")
+    st.caption("Latest top-volume market rows. Limited by default for stability.")
+
+    conn = open_db()
+    try:
+        _, _, _, latest_filter = build_filters(conn)
+
         top_volume = sql_df(
             conn,
             f"""
@@ -327,9 +419,18 @@ try:
             file_name="prediction_market_latest_markets.csv",
             mime="text/csv",
         )
+    finally:
+        conn.close()
 
-    elif page == "Platforms":
-        st.subheader("Platform Comparison")
+
+def render_platforms() -> None:
+    st.title("Platforms")
+    st.caption("Platform-level dataset coverage.")
+
+    conn = open_db()
+    try:
+        _, _, where_clause, _ = build_filters(conn)
+
         platform_stats = sql_df(
             conn,
             f"""
@@ -348,13 +449,24 @@ try:
             """,
         )
         show_df(platform_stats, height=300)
-        if not platform_stats.empty:
-            st.bar_chart(platform_stats[["platform", "rows"]].set_index("platform"), use_container_width=True)
-            st.bar_chart(platform_stats[["platform", "unique_markets"]].set_index("platform"), use_container_width=True)
 
-    elif page == "Movers":
-        st.subheader("Market Movers")
-        st.caption("Largest moves from the most recent 12 hours of snapshots.")
+        if not platform_stats.empty:
+            st.subheader("Rows By Platform")
+            st.bar_chart(platform_stats[["platform", "rows"]].set_index("platform"), use_container_width=True)
+            st.subheader("Unique Markets By Platform")
+            st.bar_chart(platform_stats[["platform", "unique_markets"]].set_index("platform"), use_container_width=True)
+    finally:
+        conn.close()
+
+
+def render_movers() -> None:
+    st.title("Movers")
+    st.caption("Largest moves from recent snapshots. Limited by default for stability.")
+
+    conn = open_db()
+    try:
+        _, _, _, latest_filter = build_filters(conn)
+
         movers = sql_df(
             conn,
             f"""
@@ -391,6 +503,7 @@ try:
             LIMIT 75
             """,
         )
+
         if movers.empty:
             st.info("No movers found yet. Let the scheduler collect more snapshots.")
         else:
@@ -401,126 +514,144 @@ try:
                 file_name="prediction_market_movers.csv",
                 mime="text/csv",
             )
+    finally:
+        conn.close()
 
-    elif page == "Market Matcher":
-        st.subheader("Market Matcher")
-        st.caption("Compare likely equivalent live prediction markets across supported platform pairs.")
+
+def render_matcher() -> None:
+    st.title("Market Matcher")
+    st.caption("Compare likely equivalent live prediction markets across supported platform pairs.")
+
+    conn = open_db()
+    try:
+        _, _, _, latest_filter = build_filters(conn)
 
         min_match_score = st.slider("Minimum match score", 0.10, 1.00, 0.30, 0.05)
         min_spread = st.slider("Minimum price difference", 0.00, 0.50, 0.00, 0.01)
         max_per_platform = st.slider("Markets per platform", 50, 250, 100, 25)
         keyword_focus = st.text_input("Optional keyword focus", placeholder="bitcoin, trump, fed, world cup...")
 
-        if not st.button("Run Market Matcher", type="primary"):
+        run_matcher = st.button("Run Market Matcher", type="primary")
+
+        if not run_matcher:
             st.info("Set filters, then click Run Market Matcher. This keeps the explorer stable.")
-        else:
-            matcher_filter = latest_filter
-            if keyword_focus:
-                matcher_filter += f" AND LOWER(title) LIKE '%{safe_sql_text(keyword_focus.lower())}%'"
+            return
 
-            latest = sql_df(
-                conn,
-                f"""
-                WITH latest AS (
-                    SELECT *
-                    FROM market_snapshots
-                    WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM market_snapshots)
-                ),
-                ranked AS (
-                    SELECT
-                        platform,
-                        market_id,
-                        title,
-                        yes_price,
-                        no_price,
-                        volume,
-                        liquidity,
-                        raw_url,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY platform
-                            ORDER BY COALESCE(volume, 0) DESC, COALESCE(liquidity, 0) DESC
-                        ) AS rn
-                    FROM latest
-                    WHERE title IS NOT NULL
-                      AND yes_price IS NOT NULL
-                      {matcher_filter}
-                )
+        matcher_filter = latest_filter
+        if keyword_focus:
+            matcher_filter += f" AND LOWER(title) LIKE '%{safe_sql_text(keyword_focus.lower())}%'"
+
+        latest = sql_df(
+            conn,
+            f"""
+            WITH latest AS (
                 SELECT *
-                FROM ranked
-                WHERE rn <= ?
-                """,
-                [max_per_platform],
+                FROM market_snapshots
+                WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM market_snapshots)
+            ),
+            ranked AS (
+                SELECT
+                    platform,
+                    market_id,
+                    title,
+                    yes_price,
+                    no_price,
+                    volume,
+                    liquidity,
+                    raw_url,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY platform
+                        ORDER BY COALESCE(volume, 0) DESC, COALESCE(liquidity, 0) DESC
+                    ) AS rn
+                FROM latest
+                WHERE title IS NOT NULL
+                  AND yes_price IS NOT NULL
+                  {matcher_filter}
             )
+            SELECT *
+            FROM ranked
+            WHERE rn <= ?
+            """,
+            [max_per_platform],
+        )
 
-            if latest.empty or latest["platform"].nunique() < 2:
-                st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
-            else:
-                rows = latest.to_dict("records")
-                prepared = [{**row, "tokens": token_set(row.get("title"))} for row in rows]
+        if latest.empty or latest["platform"].nunique() < 2:
+            st.info("Not enough cross-platform latest data to run the matcher with the current filters.")
+            return
 
-                matches = []
-                for i, a in enumerate(prepared):
-                    for b in prepared[i + 1:]:
-                        platform_a = str(a.get("platform")).lower()
-                        platform_b = str(b.get("platform")).lower()
-                        if platform_a == platform_b:
-                            continue
+        rows = latest.to_dict("records")
+        prepared = [{**row, "tokens": token_set(row.get("title"))} for row in rows]
 
-                        title_score = similarity(a.get("title"), b.get("title"))
-                        token_score = jaccard(a.get("tokens", set()), b.get("tokens", set()))
-                        overlap_terms = sorted(a.get("tokens", set()) & b.get("tokens", set()))
+        matches = []
+        for i, a in enumerate(prepared):
+            for b in prepared[i + 1:]:
+                platform_a = str(a.get("platform")).lower()
+                platform_b = str(b.get("platform")).lower()
 
-                        match_score = (0.60 * token_score) + (0.40 * title_score)
-                        if len(overlap_terms) >= 2:
-                            match_score += 0.10
-                        if len(overlap_terms) >= 3:
-                            match_score += 0.10
-                        match_score = min(match_score, 1.0)
+                if platform_a == platform_b:
+                    continue
 
-                        if match_score < min_match_score:
-                            continue
+                title_score = similarity(a.get("title"), b.get("title"))
+                token_score = jaccard(a.get("tokens", set()), b.get("tokens", set()))
+                overlap_terms = sorted(a.get("tokens", set()) & b.get("tokens", set()))
 
-                        try:
-                            price_a = float(a.get("yes_price"))
-                            price_b = float(b.get("yes_price"))
-                        except Exception:
-                            continue
+                match_score = (0.60 * token_score) + (0.40 * title_score)
+                if len(overlap_terms) >= 2:
+                    match_score += 0.10
+                if len(overlap_terms) >= 3:
+                    match_score += 0.10
+                match_score = min(match_score, 1.0)
 
-                        spread = abs(price_a - price_b)
-                        if spread < min_spread:
-                            continue
+                if match_score < min_match_score:
+                    continue
 
-                        matches.append({
-                            "Platform A": platform_badge(platform_a),
-                            "Market A": a.get("title"),
-                            "YES A": f"{price_a:.2%}",
-                            "Platform B": platform_badge(platform_b),
-                            "Market B": b.get("title"),
-                            "YES B": f"{price_b:.2%}",
-                            "Difference": f"{spread:.2%}",
-                            "Match Score": f"{match_score:.0%}",
-                            "Shared Terms": ", ".join(overlap_terms[:10]),
-                            "URL A": a.get("raw_url"),
-                            "URL B": b.get("raw_url"),
-                        })
+                try:
+                    price_a = float(a.get("yes_price"))
+                    price_b = float(b.get("yes_price"))
+                except Exception:
+                    continue
 
-                matches_df = pd.DataFrame(matches)
-                if matches_df.empty:
-                    st.info("No matches found. Try lowering the match score, lowering price difference, or using a focused keyword.")
-                else:
-                    show_df(matches_df.head(150), height=600)
-                    st.download_button(
-                        "Download matcher results CSV",
-                        matches_df.to_csv(index=False),
-                        file_name="prediction_market_matcher_results.csv",
-                        mime="text/csv",
-                    )
+                spread = abs(price_a - price_b)
+                if spread < min_spread:
+                    continue
 
-    elif page == "Market Detail":
-        st.subheader("Market Detail")
-        st.caption("Kalshi is excluded from this selector until useful historical detail data is available.")
+                matches.append({
+                    "Platform A": platform_badge(platform_a),
+                    "Market A": a.get("title"),
+                    "YES A": f"{price_a:.2%}",
+                    "Platform B": platform_badge(platform_b),
+                    "Market B": b.get("title"),
+                    "YES B": f"{price_b:.2%}",
+                    "Difference": f"{spread:.2%}",
+                    "Match Score": f"{match_score:.0%}",
+                    "Shared Terms": ", ".join(overlap_terms[:10]),
+                    "URL A": a.get("raw_url"),
+                    "URL B": b.get("raw_url"),
+                })
 
-        market_detail_filter = latest_filter + " AND LOWER(platform) <> 'kalshi'"
+        matches_df = pd.DataFrame(matches)
+        if matches_df.empty:
+            st.info("No matches found. Try lowering the match score, lowering price difference, or using a focused keyword.")
+        else:
+            show_df(matches_df.head(150), height=600)
+            st.download_button(
+                "Download matcher results CSV",
+                matches_df.to_csv(index=False),
+                file_name="prediction_market_matcher_results.csv",
+                mime="text/csv",
+            )
+    finally:
+        conn.close()
+
+
+def render_market_detail() -> None:
+    st.title("Market Detail")
+    st.caption("Kalshi is excluded from this selector until useful historical detail data is available.")
+
+    conn = open_db()
+    try:
+        _, _, _, latest_filter = build_filters(conn, exclude_kalshi=True)
+
         markets = sql_df(
             conn,
             f"""
@@ -536,7 +667,7 @@ try:
                 MAX(snapshot_time) AS latest_snapshot
             FROM latest
             WHERE market_id IS NOT NULL
-            {market_detail_filter}
+            {latest_filter}
             GROUP BY platform, market_id
             ORDER BY latest_snapshot DESC
             LIMIT 500
@@ -545,72 +676,85 @@ try:
 
         if markets.empty:
             st.info("No markets found.")
-        else:
-            markets["label"] = (
-                markets["platform"].fillna("").astype(str)
-                + " | "
-                + markets["title"].fillna("").astype(str).str[:100]
-                + " | "
-                + markets["market_id"].fillna("").astype(str)
+            return
+
+        markets["label"] = (
+            markets["platform"].fillna("").astype(str)
+            + " | "
+            + markets["title"].fillna("").astype(str).str[:100]
+            + " | "
+            + markets["market_id"].fillna("").astype(str)
+        )
+        selected_label = st.selectbox("Select a market", markets["label"].tolist())
+        selected_row = markets.loc[markets["label"] == selected_label].iloc[0]
+        selected_platform_detail = selected_row["platform"]
+        selected_market_id = selected_row["market_id"]
+
+        if not st.button("Load Market Detail", type="primary"):
+            st.info("Select a market, then click Load Market Detail.")
+            return
+
+        history = sql_df(
+            conn,
+            """
+            SELECT
+                snapshot_time,
+                platform,
+                market_id,
+                title,
+                yes_price,
+                no_price,
+                volume,
+                liquidity,
+                status,
+                raw_url
+            FROM market_snapshots
+            WHERE platform = ?
+              AND market_id = ?
+            ORDER BY snapshot_time DESC
+            LIMIT 300
+            """,
+            [selected_platform_detail, selected_market_id],
+        )
+
+        history = history.sort_values("snapshot_time")
+        show_df(history.tail(50))
+
+        if not history.empty:
+            history["snapshot_time"] = pd.to_datetime(history["snapshot_time"])
+            latest_row = history.iloc[-1]
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Latest YES", latest_row.get("yes_price"))
+            c2.metric("Latest Volume", latest_row.get("volume"))
+            c3.metric("Observations Loaded", len(history))
+
+            price_df = history.dropna(subset=["yes_price"])[["snapshot_time", "yes_price"]].set_index("snapshot_time")
+            if not price_df.empty:
+                st.subheader("YES Price History")
+                st.line_chart(price_df, use_container_width=True)
+
+            volume_df = history.dropna(subset=["volume"])[["snapshot_time", "volume"]].set_index("snapshot_time")
+            if not volume_df.empty:
+                st.subheader("Volume History")
+                st.bar_chart(volume_df, use_container_width=True)
+
+            st.download_button(
+                "Download Market CSV",
+                history.to_csv(index=False),
+                file_name=f"{selected_platform_detail}_{selected_market_id}.csv",
+                mime="text/csv",
             )
-            selected_label = st.selectbox("Select a market", markets["label"].tolist())
-            selected_row = markets.loc[markets["label"] == selected_label].iloc[0]
-            selected_platform_detail = selected_row["platform"]
-            selected_market_id = selected_row["market_id"]
+    finally:
+        conn.close()
 
-            history = sql_df(
-                conn,
-                """
-                SELECT
-                    snapshot_time,
-                    platform,
-                    market_id,
-                    title,
-                    yes_price,
-                    no_price,
-                    volume,
-                    liquidity,
-                    status,
-                    raw_url
-                FROM market_snapshots
-                WHERE platform = ?
-                  AND market_id = ?
-                ORDER BY snapshot_time DESC
-                LIMIT 300
-                """,
-                [selected_platform_detail, selected_market_id],
-            )
-            history = history.sort_values("snapshot_time")
-            show_df(history.tail(50))
 
-            if not history.empty:
-                history["snapshot_time"] = pd.to_datetime(history["snapshot_time"])
-                latest_row = history.iloc[-1]
+def render_health() -> None:
+    st.title("Dataset Health")
+    conn = open_db()
+    try:
+        _, _, where_clause, _ = build_filters(conn)
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Latest YES", latest_row.get("yes_price"))
-                c2.metric("Latest Volume", latest_row.get("volume"))
-                c3.metric("Observations Loaded", len(history))
-
-                price_df = history.dropna(subset=["yes_price"])[["snapshot_time", "yes_price"]].set_index("snapshot_time")
-                if not price_df.empty:
-                    st.subheader("YES Price History")
-                    st.line_chart(price_df, use_container_width=True)
-
-                volume_df = history.dropna(subset=["volume"])[["snapshot_time", "volume"]].set_index("snapshot_time")
-                if not volume_df.empty:
-                    st.subheader("Volume History")
-                    st.bar_chart(volume_df, use_container_width=True)
-
-                st.download_button(
-                    "Download Market CSV",
-                    history.to_csv(index=False),
-                    file_name=f"{selected_platform_detail}_{selected_market_id}.csv",
-                    mime="text/csv",
-                )
-
-    elif page == "Health":
-        st.subheader("Dataset Health")
         health = sql_df(
             conn,
             f"""
@@ -631,39 +775,80 @@ try:
         show_df(health)
         if not health.empty:
             st.bar_chart(health[["platform", "total_rows"]].set_index("platform"), use_container_width=True)
+    finally:
+        conn.close()
 
-    elif page == "API":
-        st.subheader("Prediction Market Dataset API")
-        st.caption("API access, billing, API key management, and usage are handled in the main customer portal.")
 
-        st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
-        st.link_button("Open API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
-        st.link_button("API Examples", f"{ACCOUNT_PORTAL_URL}/api-examples")
+def render_api_reference() -> None:
+    st.title("API Reference")
+    st.caption("API access, billing, API key management, and usage are handled in the main customer portal.")
 
-        st.divider()
-        st.subheader("Example Request")
-        example = 'curl -H "Authorization: Bearer YOUR_API_KEY" \\\n  "' + API_BASE_URL + '/v1/search?q=bitcoin"'
-        st.code(example, language="bash")
+    st.link_button("Open Account Dashboard", f"{ACCOUNT_PORTAL_URL}/dashboard")
+    st.link_button("Open API Docs", f"{ACCOUNT_PORTAL_URL}/docs")
+    st.link_button("API Examples", f"{ACCOUNT_PORTAL_URL}/api-examples")
 
-        endpoints = pd.DataFrame([
-            {"Endpoint": "/v1/health", "Description": "Dataset health and latest snapshot metadata"},
-            {"Endpoint": "/v1/stats", "Description": "Snapshot, market, and platform counts"},
-            {"Endpoint": "/v1/latest", "Description": "Latest market rows"},
-            {"Endpoint": "/v1/search?q=bitcoin", "Description": "Search latest markets by keyword"},
-            {"Endpoint": "/v1/markets", "Description": "Browse market records"},
-            {"Endpoint": "/v1/market/{market_id}", "Description": "Historical observations for one market"},
-            {"Endpoint": "/v1/platforms", "Description": "Platform-level dataset coverage"},
-            {"Endpoint": "/v1/movers", "Description": "Largest recent market moves"},
-            {"Endpoint": "/v1/categories", "Description": "Category-level market counts"},
-            {"Endpoint": "/v1/account", "Description": "Authenticated account and usage status"},
-        ])
-        show_df(endpoints, height=360)
+    st.divider()
+    st.subheader("Example Request")
+    st.code(
+        'curl -H "Authorization: Bearer YOUR_API_KEY" '
+        f'"{API_BASE_URL}/v1/search?q=bitcoin"',
+        language="bash",
+    )
+
+    endpoints = pd.DataFrame([
+        {"Endpoint": "/v1/health", "Description": "Dataset health and latest snapshot metadata"},
+        {"Endpoint": "/v1/stats", "Description": "Snapshot, market, and platform counts"},
+        {"Endpoint": "/v1/latest", "Description": "Latest market rows"},
+        {"Endpoint": "/v1/search?q=bitcoin", "Description": "Search latest markets by keyword"},
+        {"Endpoint": "/v1/markets", "Description": "Browse market records"},
+        {"Endpoint": "/v1/market/{market_id}", "Description": "Historical observations for one market"},
+        {"Endpoint": "/v1/platforms", "Description": "Platform-level dataset coverage"},
+        {"Endpoint": "/v1/movers", "Description": "Largest recent market moves"},
+        {"Endpoint": "/v1/categories", "Description": "Category-level market counts"},
+        {"Endpoint": "/v1/account", "Description": "Authenticated account and usage status"},
+    ])
+    show_df(endpoints, height=360)
+
+
+account_status, current_plan, is_active_subscription, is_professional = account_gate()
+sidebar(account_status, current_plan)
+
+if not is_active_subscription:
+    st.title("Prediction Market Dataset Explorer")
+    st.warning("A paid subscription is required to access the Dataset Explorer.")
+    st.write("Use the main customer portal to choose a plan, then open the Dataset Explorer from your customer dashboard.")
+    st.link_button("Go to Plans & Billing", f"{ACCOUNT_PORTAL_URL}/pricing")
+    st.stop()
+
+tool = get_query_param("tool", "menu")
+
+try:
+    if tool in ("menu", "", None):
+        render_tool_menu(is_professional)
+    elif tool == "overview":
+        render_overview()
+    elif tool == "markets":
+        render_markets()
+    elif tool == "platforms":
+        render_platforms()
+    elif tool == "movers":
+        render_movers()
+    elif tool == "matcher":
+        if not is_professional:
+            st.warning("Market Matcher is included in the Professional plan.")
+            st.link_button("Upgrade to Professional", f"{ACCOUNT_PORTAL_URL}/pricing")
+        else:
+            render_matcher()
+    elif tool == "market-detail":
+        render_market_detail()
+    elif tool == "health":
+        render_health()
+    elif tool == "api":
+        render_api_reference()
+    else:
+        st.error("Unknown dataset tool.")
+        if st.button("Back to Tool Menu"):
+            set_tool("menu")
 
 except Exception as exc:
-    st.error(f"Dashboard error: {exc}")
-
-finally:
-    try:
-        conn.close()
-    except Exception:
-        pass
+    st.error(f"Dataset Explorer error: {exc}")
