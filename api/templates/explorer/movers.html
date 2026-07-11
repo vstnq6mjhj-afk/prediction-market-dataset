@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a class="back-link" href="/explorer">← Back to Dataset Tools</a>
+
+<section class="hero compact">
+    <p class="eyebrow">Recent market movement</p>
+    <h1>Movers</h1>
+    <p class="hero-copy">
+        Compare the first and latest observations within a selected time window.
+        Results are capped and calculated server-side.
+    </p>
+</section>
+
+{% if error %}
+<section class="error-panel">
+    <strong>Movers query failed.</strong>
+    <p>{{ error }}</p>
+</section>
+{% endif %}
+
+<section class="metric-grid mover-metrics">
+    <article class="metric-card">
+        <span>Results shown</span>
+        <strong>{{ rows|length }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Time window</span>
+        <strong>{{ filters.hours }}h</strong>
+    </article>
+    <article class="metric-card metric-wide">
+        <span>Latest snapshot</span>
+        <strong class="metric-date">{{ latest_snapshot }}</strong>
+    </article>
+</section>
+
+<form class="filter-panel movers-filter-panel" method="get" action="/explorer/movers">
+    <label>
+        <span>Search titles</span>
+        <input
+            type="search"
+            name="q"
+            value="{{ filters.q }}"
+            placeholder="bitcoin, election, football..."
+        >
+    </label>
+
+    <label>
+        <span>Platform</span>
+        <select name="platform">
+            <option value="">All platforms</option>
+            {% for item in platforms %}
+            <option value="{{ item }}" {% if item == filters.platform %}selected{% endif %}>
+                {{ item|title }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+
+    <label>
+        <span>Time window</span>
+        <select name="hours">
+            {% for value, label in [(1, "1 hour"), (6, "6 hours"), (12, "12 hours"), (24, "24 hours"), (72, "3 days"), (168, "7 days")] %}
+            <option value="{{ value }}" {% if value == filters.hours %}selected{% endif %}>
+                {{ label }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+
+    <label>
+        <span>Sort by</span>
+        <select name="sort">
+            <option value="price_change" {% if filters.sort == "price_change" %}selected{% endif %}>Price change</option>
+            <option value="volume_change" {% if filters.sort == "volume_change" %}selected{% endif %}>Volume change</option>
+            <option value="liquidity_change" {% if filters.sort == "liquidity_change" %}selected{% endif %}>Liquidity change</option>
+            <option value="latest_volume" {% if filters.sort == "latest_volume" %}selected{% endif %}>Latest volume</option>
+            <option value="latest_liquidity" {% if filters.sort == "latest_liquidity" %}selected{% endif %}>Latest liquidity</option>
+            <option value="title" {% if filters.sort == "title" %}selected{% endif %}>Title</option>
+            <option value="platform" {% if filters.sort == "platform" %}selected{% endif %}>Platform</option>
+        </select>
+    </label>
+
+    <label>
+        <span>Direction</span>
+        <select name="direction">
+            <option value="desc" {% if filters.direction == "desc" %}selected{% endif %}>Descending</option>
+            <option value="asc" {% if filters.direction == "asc" %}selected{% endif %}>Ascending</option>
+        </select>
+    </label>
+
+    <label>
+        <span>Rows</span>
+        <select name="limit">
+            {% for value in [25, 50, 100] %}
+            <option value="{{ value }}" {% if value == filters.limit %}selected{% endif %}>
+                {{ value }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+
+    <button class="button filter-submit" type="submit">Apply filters</button>
+    <a class="secondary-button" href="/explorer/movers">Clear</a>
+    <a class="secondary-button" href="{{ export_url }}">Export results</a>
+</form>
+
+<section class="mover-list">
+    {% for row in rows %}
+    <article class="mover-card">
+        <div class="mover-card-heading">
+            <div>
+                <span class="platform-badge">{{ row.platform|title }}</span>
+                <h2>{{ row.title or "Untitled market" }}</h2>
+                <p>{{ row.market_id }}</p>
+            </div>
+            <div class="mover-change {{ row.price_direction }}">
+                <span>YES movement</span>
+                <strong>{{ row.price_change_display }}</strong>
+            </div>
+        </div>
+
+        <div class="mover-price-grid">
+            <div>
+                <span>First YES</span>
+                <strong>{{ row.first_price_display }}</strong>
+            </div>
+            <div>
+                <span>Latest YES</span>
+                <strong>{{ row.latest_price_display }}</strong>
+            </div>
+            <div>
+                <span>Volume change</span>
+                <strong>{{ row.volume_change_display }}</strong>
+            </div>
+            <div>
+                <span>Liquidity change</span>
+                <strong>{{ row.liquidity_change_display }}</strong>
+            </div>
+            <div>
+                <span>Latest volume</span>
+                <strong>{{ row.latest_volume_display }}</strong>
+            </div>
+            <div>
+                <span>Observations</span>
+                <strong>{{ row.observations_display }}</strong>
+            </div>
+        </div>
+
+        <footer class="mover-footer">
+            <div>
+                <span>Window</span>
+                <strong>{{ row.first_snapshot_display }} → {{ row.latest_snapshot_display }}</strong>
+            </div>
+            {% if row.raw_url %}
+            <a href="{{ row.raw_url }}" target="_blank" rel="noopener">Open source</a>
+            {% endif %}
+        </footer>
+    </article>
+    {% endfor %}
+</section>
+
+{% if not rows and not error %}
+<p class="empty-state">
+    No markets have at least two observations in this window. Try a longer time range.
+</p>
+{% endif %}
+{% endblock %}

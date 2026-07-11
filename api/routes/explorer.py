@@ -44,7 +44,7 @@ TOOLS = [
         "name": "Movers",
         "slug": "movers",
         "description": "Inspect recent price, volume, and liquidity changes.",
-        "status": "Planned",
+        "status": "Live",
     },
     {
         "name": "Market Matcher",
@@ -74,6 +74,17 @@ SORT_COLUMNS = {
     "title": "title",
     "platform": "platform",
     "snapshot_time": "snapshot_time",
+}
+
+
+MOVER_SORT_COLUMNS = {
+    "price_change": "ABS(price_change)",
+    "volume_change": "ABS(volume_change)",
+    "liquidity_change": "ABS(liquidity_change)",
+    "latest_volume": "latest_volume",
+    "latest_liquidity": "latest_liquidity",
+    "title": "title",
+    "platform": "platform",
 }
 
 
@@ -368,6 +379,163 @@ def _platform_comparison(
             }
         )
     return output
+
+
+def _mover_conditions(
+    search: str,
+    platform: str,
+) -> Tuple[str, List[Any]]:
+    conditions = ["yes_price IS NOT NULL"]
+    params: List[Any] = []
+
+    clean_search = search.strip()
+    clean_platform = platform.strip()
+
+    if clean_search:
+        conditions.append("LOWER(COALESCE(title, '')) LIKE ?")
+        params.append(f"%{clean_search.lower()}%")
+
+    if clean_platform:
+        conditions.append("LOWER(platform) = ?")
+        params.append(clean_platform.lower())
+
+    return " AND ".join(conditions), params
+
+
+def _fetch_movers(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    search: str,
+    platform: str,
+    hours: int,
+    sort: str,
+    direction: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    sort_expression = MOVER_SORT_COLUMNS.get(sort, "ABS(price_change)")
+    direction_sql = "ASC" if direction.lower() == "asc" else "DESC"
+    where_sql, params = _mover_conditions(search, platform)
+
+    cursor = connection.execute(
+        f"""
+        WITH latest_time AS (
+            SELECT MAX(snapshot_time) AS max_time
+            FROM market_snapshots
+        ),
+        recent AS (
+            SELECT
+                platform,
+                market_id,
+                title,
+                yes_price,
+                volume,
+                liquidity,
+                snapshot_time,
+                raw_url,
+                status
+            FROM market_snapshots
+            WHERE snapshot_time >= (
+                SELECT max_time - (? * INTERVAL '1 hour')
+                FROM latest_time
+            )
+              AND {where_sql}
+        ),
+        changes AS (
+            SELECT
+                platform,
+                market_id,
+                MAX(title) AS title,
+                COUNT(*) AS observations,
+                FIRST(yes_price ORDER BY snapshot_time) AS first_price,
+                LAST(yes_price ORDER BY snapshot_time) AS latest_price,
+                LAST(yes_price ORDER BY snapshot_time)
+                    - FIRST(yes_price ORDER BY snapshot_time) AS price_change,
+                FIRST(volume ORDER BY snapshot_time) AS first_volume,
+                LAST(volume ORDER BY snapshot_time) AS latest_volume,
+                LAST(volume ORDER BY snapshot_time)
+                    - FIRST(volume ORDER BY snapshot_time) AS volume_change,
+                FIRST(liquidity ORDER BY snapshot_time) AS first_liquidity,
+                LAST(liquidity ORDER BY snapshot_time) AS latest_liquidity,
+                LAST(liquidity ORDER BY snapshot_time)
+                    - FIRST(liquidity ORDER BY snapshot_time) AS liquidity_change,
+                LAST(raw_url ORDER BY snapshot_time) AS raw_url,
+                LAST(status ORDER BY snapshot_time) AS status,
+                MIN(snapshot_time) AS first_snapshot,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM recent
+            GROUP BY platform, market_id
+            HAVING COUNT(*) >= 2
+        )
+        SELECT *
+        FROM changes
+        ORDER BY {sort_expression} {direction_sql} NULLS LAST
+        LIMIT ?
+        """,
+        [hours, *params, limit],
+    )
+    return _rows_as_dicts(cursor)
+
+
+def _decorate_mover_rows(
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+
+    for row in rows:
+        item = dict(row)
+
+        price_change = row.get("price_change")
+        try:
+            numeric_price_change = float(price_change) if price_change is not None else None
+        except (TypeError, ValueError):
+            numeric_price_change = None
+
+        item["first_price_display"] = _display_price(row.get("first_price"))
+        item["latest_price_display"] = _display_price(row.get("latest_price"))
+        item["price_change_display"] = (
+            f"{numeric_price_change:+.1%}"
+            if numeric_price_change is not None
+            else "—"
+        )
+        item["price_direction"] = (
+            "positive"
+            if numeric_price_change is not None and numeric_price_change > 0
+            else "negative"
+            if numeric_price_change is not None and numeric_price_change < 0
+            else "neutral"
+        )
+        item["volume_change_display"] = _display_number(row.get("volume_change"))
+        item["liquidity_change_display"] = _display_number(row.get("liquidity_change"))
+        item["latest_volume_display"] = _display_number(row.get("latest_volume"))
+        item["latest_liquidity_display"] = _display_number(row.get("latest_liquidity"))
+        item["first_snapshot_display"] = _display_datetime(row.get("first_snapshot"))
+        item["latest_snapshot_display"] = _display_datetime(row.get("latest_snapshot"))
+        item["observations_display"] = f"{int(row.get('observations') or 0):,}"
+        output.append(item)
+
+    return output
+
+
+def _movers_url(
+    *,
+    search: str,
+    platform: str,
+    hours: int,
+    sort: str,
+    direction: str,
+    limit: int,
+    export: bool = False,
+) -> str:
+    params = {
+        "q": search,
+        "platform": platform,
+        "hours": hours,
+        "sort": sort,
+        "direction": direction,
+        "limit": limit,
+    }
+    base = "/explorer/movers/export" if export else "/explorer/movers"
+    return f"{base}?{urlencode(params)}"
 
 def _display_number(value: Any) -> str:
     if value is None:
@@ -687,6 +855,140 @@ def explorer_platforms(request: Request):
             "latest_snapshot": _display_datetime(latest_snapshot),
             "platform_count": len(rows),
             "error": error,
+        },
+    )
+
+
+@router.get("/movers")
+def explorer_movers(
+    request: Request,
+    q: str = Query(default="", max_length=120),
+    platform: str = Query(default="", max_length=50),
+    hours: int = Query(default=12, ge=1, le=168),
+    sort: str = Query(default="price_change"),
+    direction: str = Query(default="desc"),
+    limit: int = Query(default=50, ge=10, le=100),
+):
+    error: Optional[str] = None
+    rows: List[Dict[str, Any]] = []
+    platforms: List[str] = []
+    latest_snapshot: Optional[Any] = None
+
+    if sort not in MOVER_SORT_COLUMNS:
+        sort = "price_change"
+    if direction not in {"asc", "desc"}:
+        direction = "desc"
+
+    try:
+        with _connect() as connection:
+            latest_snapshot = _latest_snapshot(connection)
+            platforms = _platforms(connection, latest_snapshot)
+            rows = _decorate_mover_rows(
+                _fetch_movers(
+                    connection,
+                    search=q,
+                    platform=platform,
+                    hours=hours,
+                    sort=sort,
+                    direction=direction,
+                    limit=limit,
+                )
+            )
+    except Exception as exc:
+        error = str(exc)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="explorer/movers.html",
+        context={
+            "page_title": "Movers",
+            "rows": rows,
+            "platforms": platforms,
+            "latest_snapshot": _display_datetime(latest_snapshot),
+            "error": error,
+            "filters": {
+                "q": q,
+                "platform": platform,
+                "hours": hours,
+                "sort": sort,
+                "direction": direction,
+                "limit": limit,
+            },
+            "export_url": _movers_url(
+                search=q,
+                platform=platform,
+                hours=hours,
+                sort=sort,
+                direction=direction,
+                limit=limit,
+                export=True,
+            ),
+        },
+    )
+
+
+@router.get("/movers/export")
+def export_movers(
+    q: str = Query(default="", max_length=120),
+    platform: str = Query(default="", max_length=50),
+    hours: int = Query(default=12, ge=1, le=168),
+    sort: str = Query(default="price_change"),
+    direction: str = Query(default="desc"),
+    limit: int = Query(default=100, ge=10, le=500),
+):
+    if sort not in MOVER_SORT_COLUMNS:
+        sort = "price_change"
+    if direction not in {"asc", "desc"}:
+        direction = "desc"
+
+    with _connect() as connection:
+        rows = _fetch_movers(
+            connection,
+            search=q,
+            platform=platform,
+            hours=hours,
+            sort=sort,
+            direction=direction,
+            limit=limit,
+        )
+
+    buffer = io.StringIO()
+    fieldnames = [
+        "platform",
+        "market_id",
+        "title",
+        "observations",
+        "first_price",
+        "latest_price",
+        "price_change",
+        "first_volume",
+        "latest_volume",
+        "volume_change",
+        "first_liquidity",
+        "latest_liquidity",
+        "liquidity_change",
+        "status",
+        "first_snapshot",
+        "latest_snapshot",
+        "raw_url",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(
+            {
+                key: _safe_csv_value(row.get(key))
+                for key in fieldnames
+            }
+        )
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="prediction_market_movers_{hours}h.csv"'
+            )
         },
     )
 
