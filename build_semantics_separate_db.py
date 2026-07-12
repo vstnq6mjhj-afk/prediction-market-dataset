@@ -8,8 +8,9 @@ from typing import Any, Optional
 
 import duckdb
 
-DB_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
-PARSER_VERSION = "semantic-live-v1"
+WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
+SEMANTICS_PATH = Path(os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb"))
+PARSER_VERSION = "semantic-live-separate-db-v1"
 
 
 def normalize_text(value: Any) -> str:
@@ -222,20 +223,26 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIME
 
 
 def main() -> None:
-    if not DB_PATH.exists():
-        raise FileNotFoundError(f"Warehouse not found: {DB_PATH}")
+    if not WAREHOUSE_PATH.exists():
+        raise FileNotFoundError(f"Warehouse not found: {WAREHOUSE_PATH}")
 
-    connection = duckdb.connect(str(DB_PATH))
-    connection.execute("SET threads = 1")
-    connection.execute("SET preserve_insertion_order = false")
-    connection.execute("SET memory_limit = '64MB'")
+    if SEMANTICS_PATH.exists():
+        SEMANTICS_PATH.unlink()
+
+    con = duckdb.connect(str(SEMANTICS_PATH))
+    con.execute("SET threads = 1")
+    con.execute("SET preserve_insertion_order = false")
+    con.execute("SET memory_limit = '192MB'")
+    con.execute(
+        f"ATTACH '{WAREHOUSE_PATH.as_posix()}' AS warehouse (READ_ONLY)"
+    )
 
     try:
-        latest_snapshot = connection.execute(
-            "SELECT MAX(snapshot_time) FROM market_snapshots"
+        latest_snapshot = con.execute(
+            "SELECT MAX(snapshot_time) FROM warehouse.market_snapshots"
         ).fetchone()[0]
 
-        cursor = connection.execute(
+        cursor = con.execute(
             """
             SELECT
                 platform,
@@ -243,7 +250,7 @@ def main() -> None:
                 title,
                 raw_url,
                 snapshot_time
-            FROM market_snapshots
+            FROM warehouse.market_snapshots
             WHERE snapshot_time = ?
               AND market_id IS NOT NULL
             """,
@@ -254,37 +261,29 @@ def main() -> None:
         records = [dict(zip(columns, row)) for row in cursor.fetchall()]
         parsed = [infer(record) for record in records]
 
-        connection.execute(CREATE_SQL)
-        connection.execute("BEGIN TRANSACTION")
-        connection.execute("DELETE FROM market_semantics_live")
+        con.execute(CREATE_SQL)
+        for row in parsed:
+            con.execute(INSERT_SQL, row)
 
-        for start in range(0, len(parsed), 25):
-            connection.executemany(INSERT_SQL, parsed[start:start + 25])
+        con.execute("CHECKPOINT")
 
-        connection.execute("COMMIT")
-        connection.execute("CHECKPOINT")
-
-        counts = connection.execute(
+        total, matchable = con.execute(
             """
             SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE is_matchable = TRUE) AS matchable
+                COUNT(*),
+                COUNT(*) FILTER (WHERE is_matchable = TRUE)
             FROM market_semantics_live
             """
         ).fetchone()
 
-        print(f"[live-semantics] Latest snapshot: {latest_snapshot}")
-        print(f"[live-semantics] Parsed markets: {counts[0]:,}")
-        print(f"[live-semantics] Matchable markets: {counts[1]:,}")
-        print("[live-semantics] Complete")
-    except Exception:
-        try:
-            connection.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
+        print(f"[semantics-db] Warehouse: {WAREHOUSE_PATH}")
+        print(f"[semantics-db] Output: {SEMANTICS_PATH}")
+        print(f"[semantics-db] Latest snapshot: {latest_snapshot}")
+        print(f"[semantics-db] Parsed markets: {total:,}")
+        print(f"[semantics-db] Matchable markets: {matchable:,}")
+        print("[semantics-db] Complete")
     finally:
-        connection.close()
+        con.close()
 
 
 if __name__ == "__main__":
