@@ -4,11 +4,11 @@
 <a class="back-link" href="/explorer">← Back to Dataset Tools</a>
 
 <section class="hero compact">
-    <p class="eyebrow">Cross-platform market comparison</p>
+    <p class="eyebrow">Canonical cross-platform comparison</p>
     <h1>Market Matcher</h1>
     <p class="hero-copy">
-        Compare a capped set of high-volume markets from two platforms.
-        Strong shared-keyword and similarity rules remove weak matches.
+        Only markets with the same canonical semantic key are shown.
+        Titles are used for display and optional filtering, not as the final matching decision.
     </p>
 </section>
 
@@ -22,30 +22,30 @@
 {% if same_platform %}
 <section class="error-panel">
     <strong>Select two different platforms.</strong>
-    <p>The matcher only compares markets across separate platforms.</p>
+    <p>The matcher compares markets across separate platforms.</p>
 </section>
 {% endif %}
 
 <section class="metric-grid matcher-metrics">
     <article class="metric-card">
-        <span>Matches</span>
+        <span>Verified matches</span>
         <strong>{{ rows|length }}</strong>
     </article>
     <article class="metric-card">
-        <span>{{ filters.platform_a|title }} candidates</span>
+        <span>{{ filters.platform_a|title }} matchable</span>
         <strong>{{ candidate_count_a }}</strong>
     </article>
     <article class="metric-card">
-        <span>{{ filters.platform_b|title }} candidates</span>
+        <span>{{ filters.platform_b|title }} matchable</span>
         <strong>{{ candidate_count_b }}</strong>
     </article>
     <article class="metric-card metric-wide">
-        <span>Latest snapshot</span>
+        <span>Semantic snapshot</span>
         <strong class="metric-date">{{ latest_snapshot }}</strong>
     </article>
 </section>
 
-<form class="filter-panel matcher-filter-panel" method="get" action="/explorer/matcher">
+<form class="filter-panel matcher-filter-panel semantic-filter-panel" method="get" action="/explorer/matcher">
     <label>
         <span>Platform A</span>
         <select name="platform_a">
@@ -69,7 +69,7 @@
     </label>
 
     <label>
-        <span>Keyword focus</span>
+        <span>Optional title filter</span>
         <input
             type="search"
             name="keyword"
@@ -79,44 +79,11 @@
     </label>
 
     <label>
-        <span>Minimum score</span>
-        <select name="minimum_score">
-            {% for value, label in [(0.50, "50%"), (0.58, "58%"), (0.65, "65%"), (0.72, "72%"), (0.80, "80%")] %}
-            <option value="{{ value }}" {% if value == filters.minimum_score %}selected{% endif %}>
-                {{ label }}
-            </option>
-            {% endfor %}
-        </select>
-    </label>
-
-    <label>
-        <span>Shared keywords</span>
-        <select name="minimum_shared_terms">
-            {% for value in [1, 2, 3, 4] %}
-            <option value="{{ value }}" {% if value == filters.minimum_shared_terms %}selected{% endif %}>
-                {{ value }}
-            </option>
-            {% endfor %}
-        </select>
-    </label>
-
-    <label>
         <span>Minimum price gap</span>
         <select name="minimum_price_difference">
             {% for value, label in [(0.0, "Any"), (0.02, "2%"), (0.05, "5%"), (0.10, "10%"), (0.20, "20%")] %}
             <option value="{{ value }}" {% if value == filters.minimum_price_difference %}selected{% endif %}>
                 {{ label }}
-            </option>
-            {% endfor %}
-        </select>
-    </label>
-
-    <label>
-        <span>Markets/platform</span>
-        <select name="markets_per_platform">
-            {% for value in [20, 35, 50, 60] %}
-            <option value="{{ value }}" {% if value == filters.markets_per_platform %}selected{% endif %}>
-                {{ value }}
             </option>
             {% endfor %}
         </select>
@@ -133,7 +100,7 @@
         </select>
     </label>
 
-    <button class="button filter-submit" type="submit">Apply matcher filters</button>
+    <button class="button filter-submit" type="submit">Find verified matches</button>
     <a class="secondary-button" href="/explorer/matcher">Reset</a>
     <a class="secondary-button" href="{{ export_url }}">Export matches</a>
 </form>
@@ -143,16 +110,22 @@
     <article class="matcher-card">
         <div class="matcher-card-top">
             <div class="matcher-score">
-                <span>Match score</span>
-                <strong>{{ row.score_display }}</strong>
+                <span>Match status</span>
+                <strong class="verified-label">{{ row.score_display }}</strong>
                 <div class="quality-track">
-                    <div class="quality-fill" style="width: {{ row.score_width }}%"></div>
+                    <div class="quality-fill" style="width: 100%"></div>
                 </div>
             </div>
             <div class="matcher-gap">
                 <span>YES price difference</span>
                 <strong>{{ row.price_difference_display }}</strong>
             </div>
+        </div>
+
+        <div class="semantic-proof">
+            <span>Canonical semantics</span>
+            <strong>{{ row.semantic_summary }}</strong>
+            <code>{{ row.canonical_key_display }}</code>
         </div>
 
         <div class="matcher-pair">
@@ -162,7 +135,9 @@
                 <p>{{ row.market_id_a }}</p>
                 <div class="matcher-market-stats">
                     <div><span>YES</span><strong>{{ row.yes_a_display }}</strong></div>
+                    <div><span>NO</span><strong>{{ row.no_a_display }}</strong></div>
                     <div><span>Volume</span><strong>{{ row.volume_a_display }}</strong></div>
+                    <div><span>Liquidity</span><strong>{{ row.liquidity_a_display }}</strong></div>
                 </div>
                 {% if row.url_a %}
                 <a href="{{ row.url_a }}" target="_blank" rel="noopener">Open source</a>
@@ -177,7 +152,9 @@
                 <p>{{ row.market_id_b }}</p>
                 <div class="matcher-market-stats">
                     <div><span>YES</span><strong>{{ row.yes_b_display }}</strong></div>
+                    <div><span>NO</span><strong>{{ row.no_b_display }}</strong></div>
                     <div><span>Volume</span><strong>{{ row.volume_b_display }}</strong></div>
+                    <div><span>Liquidity</span><strong>{{ row.liquidity_b_display }}</strong></div>
                 </div>
                 {% if row.url_b %}
                 <a href="{{ row.url_b }}" target="_blank" rel="noopener">Open source</a>
@@ -186,8 +163,8 @@
         </div>
 
         <footer class="matcher-footer">
-            <span>Shared keywords</span>
-            <strong>{{ row.shared_terms_display or "—" }}</strong>
+            <span>Parser confidence</span>
+            <strong>{{ row.confidence_display }}</strong>
         </footer>
     </article>
     {% endfor %}
@@ -195,7 +172,8 @@
 
 {% if not rows and not error and not same_platform %}
 <p class="empty-state">
-    No strong matches were found. Try a focused keyword or lower the minimum score.
+    No verified canonical matches were found for this platform pair.
+    This means the matcher refused to guess; try another pair or keyword.
 </p>
 {% endif %}
 {% endblock %}

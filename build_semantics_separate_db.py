@@ -9,8 +9,10 @@ from typing import Any, Optional
 import duckdb
 
 WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
-SEMANTICS_PATH = Path(os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb"))
-PARSER_VERSION = "semantic-live-separate-db-v1"
+SEMANTICS_PATH = Path(
+    os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
+)
+PARSER_VERSION = "semantic-live-separate-db-v2"
 
 
 def normalize_text(value: Any) -> str:
@@ -27,17 +29,20 @@ def slug(value: Any) -> str:
 def parse_range_contract(text: str):
     value = normalize_text(text)
 
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s+or\s+fewer", value)
-    if m:
-        return "lte", None, float(m.group(1))
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s+or\s+fewer", value)
+    if match:
+        return "lte", None, float(match.group(1))
 
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s+or\s+(?:more|greater)", value)
-    if m:
-        return "gte", float(m.group(1)), None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s+or\s+(?:more|greater)", value)
+    if match:
+        return "gte", float(match.group(1)), None
 
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s+(?:to|-)\s+(\d+(?:\.\d+)?)", value)
-    if m:
-        return "between", float(m.group(1)), float(m.group(2))
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s+(?:to|-)\s+(\d+(?:\.\d+)?)",
+        value,
+    )
+    if match:
+        return "between", float(match.group(1)), float(match.group(2))
 
     return None, None, None
 
@@ -90,57 +95,75 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
             notes = "PredictIt contract parsed but requires review."
 
     else:
-        m = re.search(
-            r"will\s+(.+?)\s+(?:beat|defeat)\s+(.+?)(?:\s+in\b|\s+during\b|\?|$)",
+        match = re.search(
+            r"will\s+(.+?)\s+(?:beat|defeat)\s+(.+?)"
+            r"(?:\s+in\b|\s+during\b|\?|$)",
             title,
         )
-        if m:
+        if match:
             event_type = "head_to_head"
-            primary = m.group(1).strip()
-            secondary = m.group(2).strip()
+            primary = match.group(1).strip()
+            secondary = match.group(2).strip()
             target = "match_winner"
             confidence = 0.91
             matchable = True
             notes = "Head-to-head market parsed."
 
         if event_type == "unknown":
-            m = re.search(r"will\s+(.+?)\s+and\s+(.+?)\s+be\s+tied", title)
-            if m:
+            match = re.search(
+                r"will\s+(.+?)\s+and\s+(.+?)\s+be\s+tied",
+                title,
+            )
+            if match:
                 event_type = "head_to_head"
-                primary = m.group(1).strip()
-                secondary = m.group(2).strip()
+                primary = match.group(1).strip()
+                secondary = match.group(2).strip()
                 target = "tie"
                 confidence = 0.92
                 matchable = True
                 notes = "Head-to-head tie market parsed."
 
         if event_type == "unknown":
-            m = re.search(
-                r"will\s+(.+?)\s+win\s+(?:the\s+)?(?:20\d{2}\s+)?(.+?)(?:\?|$)",
+            match = re.search(
+                r"will\s+(.+?)\s+win\s+(?:the\s+)?"
+                r"(?:20\d{2}\s+)?(.+?)(?:\?|$)",
                 title,
             )
-            if m:
-                primary = m.group(1).strip()
-                competition = m.group(2).strip()
+            if match:
+                primary = match.group(1).strip()
+                competition = match.group(2).strip()
+
                 if "nomination" in competition:
                     event_type = "nomination_winner"
                 elif "election" in competition:
                     event_type = "election_winner"
-                elif any(x in competition for x in ("world cup", "championship", "tournament", "league")):
+                elif any(
+                    term in competition
+                    for term in (
+                        "world cup",
+                        "championship",
+                        "tournament",
+                        "league",
+                    )
+                ):
                     event_type = "tournament_winner"
                 else:
                     event_type = "event_winner"
+
                 target = "winner"
                 confidence = 0.88
                 matchable = True
                 notes = "Winner market parsed."
 
         if event_type == "unknown":
-            m = re.search(r"(.+?)\s+before\s+(.+?)(?:\?|$)", title)
-            if m:
+            match = re.search(
+                r"(.+?)\s+before\s+(.+?)(?:\?|$)",
+                title,
+            )
+            if match:
                 event_type = "relative_deadline"
-                primary = m.group(1).strip()
-                secondary = m.group(2).strip()
+                primary = match.group(1).strip()
+                secondary = match.group(2).strip()
                 target = "occurs_before"
                 confidence = 0.86
                 matchable = True
@@ -179,13 +202,18 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         matchable,
         notes,
         row.get("raw_url"),
+        row.get("yes_price"),
+        row.get("no_price"),
+        row.get("volume"),
+        row.get("liquidity"),
+        row.get("status"),
         row.get("snapshot_time"),
         PARSER_VERSION,
     )
 
 
 CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS market_semantics_live (
+CREATE TABLE market_semantics_live (
     platform VARCHAR NOT NULL,
     market_id VARCHAR NOT NULL,
     raw_title VARCHAR,
@@ -204,6 +232,11 @@ CREATE TABLE IF NOT EXISTS market_semantics_live (
     is_matchable BOOLEAN,
     parse_notes VARCHAR,
     source_url VARCHAR,
+    yes_price DOUBLE,
+    no_price DOUBLE,
+    volume DOUBLE,
+    liquidity DOUBLE,
+    status VARCHAR,
     snapshot_time TIMESTAMP WITH TIME ZONE,
     parser_version VARCHAR,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -212,13 +245,38 @@ CREATE TABLE IF NOT EXISTS market_semantics_live (
 """
 
 INSERT_SQL = """
-INSERT OR REPLACE INTO market_semantics_live (
-    platform, market_id, raw_title, normalized_title, event_type, outcome_type,
-    primary_entity, secondary_entity, competition, target, comparison_operator,
-    lower_threshold, upper_threshold, canonical_key, extraction_confidence,
-    is_matchable, parse_notes, source_url, snapshot_time, parser_version, updated_at
+INSERT INTO market_semantics_live (
+    platform,
+    market_id,
+    raw_title,
+    normalized_title,
+    event_type,
+    outcome_type,
+    primary_entity,
+    secondary_entity,
+    competition,
+    target,
+    comparison_operator,
+    lower_threshold,
+    upper_threshold,
+    canonical_key,
+    extraction_confidence,
+    is_matchable,
+    parse_notes,
+    source_url,
+    yes_price,
+    no_price,
+    volume,
+    liquidity,
+    status,
+    snapshot_time,
+    parser_version,
+    updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    CURRENT_TIMESTAMP
+)
 """
 
 
@@ -226,29 +284,35 @@ def main() -> None:
     if not WAREHOUSE_PATH.exists():
         raise FileNotFoundError(f"Warehouse not found: {WAREHOUSE_PATH}")
 
-    if SEMANTICS_PATH.exists():
-        SEMANTICS_PATH.unlink()
+    temporary_path = SEMANTICS_PATH.with_suffix(".tmp.duckdb")
+    if temporary_path.exists():
+        temporary_path.unlink()
 
-    con = duckdb.connect(str(SEMANTICS_PATH))
-    con.execute("SET threads = 1")
-    con.execute("SET preserve_insertion_order = false")
-    con.execute("SET memory_limit = '192MB'")
-    con.execute(
+    connection = duckdb.connect(str(temporary_path))
+    connection.execute("SET threads = 1")
+    connection.execute("SET preserve_insertion_order = false")
+    connection.execute("SET memory_limit = '192MB'")
+    connection.execute(
         f"ATTACH '{WAREHOUSE_PATH.as_posix()}' AS warehouse (READ_ONLY)"
     )
 
     try:
-        latest_snapshot = con.execute(
+        latest_snapshot = connection.execute(
             "SELECT MAX(snapshot_time) FROM warehouse.market_snapshots"
         ).fetchone()[0]
 
-        cursor = con.execute(
+        cursor = connection.execute(
             """
             SELECT
                 platform,
                 market_id,
                 title,
                 raw_url,
+                yes_price,
+                no_price,
+                volume,
+                liquidity,
+                status,
                 snapshot_time
             FROM warehouse.market_snapshots
             WHERE snapshot_time = ?
@@ -261,13 +325,13 @@ def main() -> None:
         records = [dict(zip(columns, row)) for row in cursor.fetchall()]
         parsed = [infer(record) for record in records]
 
-        con.execute(CREATE_SQL)
+        connection.execute(CREATE_SQL)
         for row in parsed:
-            con.execute(INSERT_SQL, row)
+            connection.execute(INSERT_SQL, row)
 
-        con.execute("CHECKPOINT")
+        connection.execute("CHECKPOINT")
 
-        total, matchable = con.execute(
+        total, matchable = connection.execute(
             """
             SELECT
                 COUNT(*),
@@ -277,13 +341,19 @@ def main() -> None:
         ).fetchone()
 
         print(f"[semantics-db] Warehouse: {WAREHOUSE_PATH}")
-        print(f"[semantics-db] Output: {SEMANTICS_PATH}")
+        print(f"[semantics-db] Temporary output: {temporary_path}")
         print(f"[semantics-db] Latest snapshot: {latest_snapshot}")
         print(f"[semantics-db] Parsed markets: {total:,}")
         print(f"[semantics-db] Matchable markets: {matchable:,}")
-        print("[semantics-db] Complete")
     finally:
-        con.close()
+        connection.close()
+
+    if SEMANTICS_PATH.exists():
+        SEMANTICS_PATH.unlink()
+    temporary_path.replace(SEMANTICS_PATH)
+
+    print(f"[semantics-db] Published: {SEMANTICS_PATH}")
+    print("[semantics-db] Complete")
 
 
 if __name__ == "__main__":

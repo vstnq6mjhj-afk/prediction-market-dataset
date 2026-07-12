@@ -1326,3 +1326,51 @@ code {
         transform: rotate(90deg);
     }
 }
+
+
+.semantic-filter-panel {
+    grid-template-columns: repeat(5, minmax(145px, 1fr));
+}
+
+.semantic-proof {
+    display: grid;
+    gap: 7px;
+    margin: 0 0 18px;
+    padding: 15px;
+    border: 1px solid rgba(45, 212, 191, 0.24);
+    border-radius: 14px;
+    background: rgba(13, 148, 136, 0.08);
+}
+
+.semantic-proof span {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.semantic-proof strong {
+    color: #99f6e4;
+}
+
+.semantic-proof code {
+    color: #cbd5e1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.verified-label {
+    color: #5eead4;
+}
+
+@media (max-width: 1050px) {
+    .semantic-filter-panel {
+        grid-template-columns: repeat(2, minmax(145px, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    .semantic-filter-panel {
+        grid-template-columns: 1fr;
+    }
+}

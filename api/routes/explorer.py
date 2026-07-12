@@ -22,6 +22,7 @@ router = APIRouter(
 
 templates = Jinja2Templates(directory="api/templates")
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
+SEMANTICS_DB_PATH = os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 
 TOOLS = [
     {
@@ -768,251 +769,174 @@ def _market_sparkline_points(
     return " ".join(points)
 
 
-MATCH_STOPWORDS = {
-    "will", "would", "the", "a", "an", "in", "on", "for", "of", "to", "with",
-    "and", "or", "who", "what", "when", "where", "which", "market", "markets",
-    "prediction", "contract", "event", "yes", "no", "win", "wins", "winner",
-    "before", "after", "during", "by", "from", "at", "be", "is", "are",
-}
+
+def _connect_semantics() -> duckdb.DuckDBPyConnection:
+    if not os.path.exists(SEMANTICS_DB_PATH):
+        raise FileNotFoundError(
+            f"Semantic matcher database not found: {SEMANTICS_DB_PATH}. "
+            "Run build_semantics_separate_db.py first."
+        )
+
+    connection = duckdb.connect(SEMANTICS_DB_PATH, read_only=True)
+    try:
+        connection.execute("PRAGMA threads=1")
+    except Exception:
+        pass
+    return connection
 
 
-GENERIC_EVENT_TERMS = {
-    "world", "cup", "fifa", "uefa", "election", "nomination", "presidential",
-    "democratic", "republican", "final", "finals", "tournament", "championship",
-    "league", "season", "regular", "time", "million", "billion", "year",
-    "2025", "2026", "2027", "2028", "2029", "2030",
-}
+def _semantic_platforms(
+    connection: duckdb.DuckDBPyConnection,
+) -> List[str]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT platform
+        FROM market_semantics_live
+        WHERE is_matchable = TRUE
+          AND platform IS NOT NULL
+        ORDER BY platform
+        """
+    ).fetchall()
+    return [str(row[0]) for row in rows]
 
 
-def _match_intent_family(value: Any) -> str:
-    text = str(value or "").lower()
-
-    if any(term in text for term in ("wikipedia", "pageview", "page view", "visits", "downloads")):
-        return "web_metric"
-
-    if any(term in text for term in ("beat ", "beats ", "defeat ", "defeats ", " vs ", " versus ", "regular time")):
-        return "head_to_head"
-
-    if "nomination" in text:
-        return "nomination"
-
-    if "election" in text and any(term in text for term in (" win ", "winner", "elected", "become president")):
-        return "election_winner"
-
-    if any(term in text for term in ("world cup", "championship", "tournament", "league")) and any(
-        term in text for term in (" win ", "wins ", "winner")
-    ):
-        return "outright_winner"
-
-    if any(term in text for term in ("above", "below", "exceed", "at least", "more than", "less than")):
-        return "threshold"
-
-    return "unknown"
+def _semantic_latest_snapshot(
+    connection: duckdb.DuckDBPyConnection,
+) -> Any:
+    row = connection.execute(
+        "SELECT MAX(snapshot_time) FROM market_semantics_live"
+    ).fetchone()
+    return row[0] if row else None
 
 
-def _core_match_tokens(value: Any) -> set:
-    return {
-        token
-        for token in _match_tokens(value)
-        if token not in GENERIC_EVENT_TERMS
-    }
-
-
-def _normalize_match_title(value: Any) -> str:
-    text = str(value or "").lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    words = [
-        word for word in text.split()
-        if len(word) >= 3 and word not in MATCH_STOPWORDS
-    ]
-    return " ".join(words[:18])
-
-
-def _match_tokens(value: Any) -> set:
-    return set(_normalize_match_title(value).split())
-
-
-def _jaccard(left: set, right: set) -> float:
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
-
-
-def _matcher_candidates(
+def _semantic_candidate_count(
     connection: duckdb.DuckDBPyConnection,
     *,
     platform: str,
     keyword: str,
-    limit: int,
-) -> List[Dict[str, Any]]:
-    latest_snapshot = _latest_snapshot(connection)
+) -> int:
     conditions = [
-        "snapshot_time = ?",
-        "LOWER(platform) = ?",
-        "title IS NOT NULL",
-        "yes_price IS NOT NULL",
+        "is_matchable = TRUE",
+        "LOWER(platform) = LOWER(?)",
+        "canonical_key IS NOT NULL",
     ]
-    params: List[Any] = [latest_snapshot, platform.lower()]
+    params: List[Any] = [platform]
 
     if keyword.strip():
-        conditions.append("LOWER(title) LIKE ?")
+        conditions.append("LOWER(COALESCE(raw_title, '')) LIKE ?")
         params.append(f"%{keyword.strip().lower()}%")
+
+    return int(
+        connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM market_semantics_live
+            WHERE {" AND ".join(conditions)}
+            """,
+            params,
+        ).fetchone()[0]
+        or 0
+    )
+
+
+def _semantic_matches(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    platform_a: str,
+    platform_b: str,
+    keyword: str,
+    minimum_price_difference: float,
+    result_limit: int,
+) -> List[Dict[str, Any]]:
+    keyword_sql = ""
+    params: List[Any] = [platform_a, platform_b]
+
+    if keyword.strip():
+        keyword_sql = """
+          AND (
+                LOWER(COALESCE(a.raw_title, '')) LIKE ?
+             OR LOWER(COALESCE(b.raw_title, '')) LIKE ?
+          )
+        """
+        search_value = f"%{keyword.strip().lower()}%"
+        params.extend([search_value, search_value])
+
+    params.extend([minimum_price_difference, result_limit])
 
     cursor = connection.execute(
         f"""
         SELECT
-            platform,
-            market_id,
-            title,
-            yes_price,
-            no_price,
-            volume,
-            liquidity,
-            raw_url,
-            snapshot_time
-        FROM market_snapshots
-        WHERE {" AND ".join(conditions)}
+            a.platform AS platform_a,
+            a.market_id AS market_id_a,
+            a.raw_title AS title_a,
+            a.yes_price AS yes_a,
+            a.no_price AS no_a,
+            a.volume AS volume_a,
+            a.liquidity AS liquidity_a,
+            a.source_url AS url_a,
+
+            b.platform AS platform_b,
+            b.market_id AS market_id_b,
+            b.raw_title AS title_b,
+            b.yes_price AS yes_b,
+            b.no_price AS no_b,
+            b.volume AS volume_b,
+            b.liquidity AS liquidity_b,
+            b.source_url AS url_b,
+
+            a.event_type,
+            a.primary_entity,
+            a.secondary_entity,
+            a.competition,
+            a.target,
+            a.canonical_key,
+            LEAST(a.extraction_confidence, b.extraction_confidence) AS confidence,
+            ABS(COALESCE(a.yes_price, 0) - COALESCE(b.yes_price, 0))
+                AS price_difference
+        FROM market_semantics_live a
+        JOIN market_semantics_live b
+          ON a.canonical_key = b.canonical_key
+         AND LOWER(a.platform) = LOWER(?)
+         AND LOWER(b.platform) = LOWER(?)
+         AND a.platform <> b.platform
+         AND a.market_id <> b.market_id
+        WHERE a.is_matchable = TRUE
+          AND b.is_matchable = TRUE
+          AND a.canonical_key IS NOT NULL
+          AND b.canonical_key IS NOT NULL
+          {keyword_sql}
+          AND ABS(COALESCE(a.yes_price, 0) - COALESCE(b.yes_price, 0)) >= ?
         ORDER BY
-            COALESCE(volume, 0) DESC,
-            COALESCE(liquidity, 0) DESC,
-            title ASC
+            confidence DESC,
+            price_difference DESC,
+            GREATEST(COALESCE(a.volume, 0), COALESCE(b.volume, 0)) DESC
         LIMIT ?
         """,
-        [*params, limit],
+        params,
     )
     return _rows_as_dicts(cursor)
 
 
-def _match_markets(
-    left_rows: Sequence[Dict[str, Any]],
-    right_rows: Sequence[Dict[str, Any]],
-    *,
-    minimum_score: float,
-    minimum_shared_terms: int,
-    minimum_price_difference: float,
-    result_limit: int,
-) -> List[Dict[str, Any]]:
-    prepared_left = [
-        {
-            **row,
-            "_normalized": _normalize_match_title(row.get("title")),
-            "_tokens": _match_tokens(row.get("title")),
-            "_core_tokens": _core_match_tokens(row.get("title")),
-            "_intent_family": _match_intent_family(row.get("title")),
-        }
-        for row in left_rows
-    ]
-    prepared_right = [
-        {
-            **row,
-            "_normalized": _normalize_match_title(row.get("title")),
-            "_tokens": _match_tokens(row.get("title")),
-            "_core_tokens": _core_match_tokens(row.get("title")),
-            "_intent_family": _match_intent_family(row.get("title")),
-        }
-        for row in right_rows
-    ]
-
-    matches: List[Dict[str, Any]] = []
-
-    for left in prepared_left:
-        for right in prepared_right:
-            # Reject clearly different market types, such as:
-            # tournament winner vs one match, election winner vs nomination,
-            # or sports outcomes vs page-view thresholds.
-            left_family = left["_intent_family"]
-            right_family = right["_intent_family"]
-            if (
-                left_family != "unknown"
-                and right_family != "unknown"
-                and left_family != right_family
-            ):
-                continue
-
-            shared_terms = sorted(left["_tokens"] & right["_tokens"])
-            if len(shared_terms) < minimum_shared_terms:
-                continue
-
-            # At least one meaningful entity/subject must overlap after removing
-            # generic terms such as "world", "cup", "fifa", and years.
-            shared_core_terms = sorted(left["_core_tokens"] & right["_core_tokens"])
-            if not shared_core_terms:
-                continue
-
-            token_score = _jaccard(left["_tokens"], right["_tokens"])
-            sentence_score = SequenceMatcher(
-                None,
-                left["_normalized"],
-                right["_normalized"],
-            ).ratio()
-
-            if token_score < 0.18 and sentence_score < 0.72:
-                continue
-
-            score = (0.74 * token_score) + (0.26 * sentence_score)
-            if len(shared_terms) >= 3:
-                score += 0.08
-            if len(shared_terms) >= 4:
-                score += 0.06
-            score = min(score, 1.0)
-
-            if score < minimum_score:
-                continue
-
-            try:
-                left_price = float(left.get("yes_price"))
-                right_price = float(right.get("yes_price"))
-            except (TypeError, ValueError):
-                continue
-
-            price_difference = abs(left_price - right_price)
-            if price_difference < minimum_price_difference:
-                continue
-
-            matches.append(
-                {
-                    "platform_a": left.get("platform"),
-                    "market_id_a": left.get("market_id"),
-                    "title_a": left.get("title"),
-                    "yes_a": left_price,
-                    "volume_a": left.get("volume"),
-                    "url_a": left.get("raw_url"),
-                    "platform_b": right.get("platform"),
-                    "market_id_b": right.get("market_id"),
-                    "title_b": right.get("title"),
-                    "yes_b": right_price,
-                    "volume_b": right.get("volume"),
-                    "url_b": right.get("raw_url"),
-                    "score": score,
-                    "price_difference": price_difference,
-                    "shared_terms": shared_terms,
-                    "shared_core_terms": shared_core_terms,
-                    "intent_family": (
-                        left_family if left_family != "unknown" else right_family
-                    ),
-                }
-            )
-
-    matches.sort(
-        key=lambda item: (
-            item["score"],
-            item["price_difference"],
-            max(
-                float(item.get("volume_a") or 0),
-                float(item.get("volume_b") or 0),
-            ),
-        ),
-        reverse=True,
-    )
-    return matches[:result_limit]
-
-
-def _decorate_match_rows(
+def _decorate_semantic_match_rows(
     rows: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
+
     for row in rows:
-        score = float(row.get("score") or 0)
+        confidence = float(row.get("confidence") or 0)
+        semantic_parts = [
+            row.get("event_type"),
+            row.get("primary_entity"),
+            row.get("secondary_entity"),
+            row.get("competition"),
+            row.get("target"),
+        ]
+        semantic_summary = " · ".join(
+            str(item).replace("_", " ").title()
+            for item in semantic_parts
+            if item
+        )
+
         output.append(
             {
                 **row,
@@ -1020,28 +944,32 @@ def _decorate_match_rows(
                 "platform_b_display": str(row.get("platform_b") or "Unknown").title(),
                 "yes_a_display": _display_price(row.get("yes_a")),
                 "yes_b_display": _display_price(row.get("yes_b")),
+                "no_a_display": _display_price(row.get("no_a")),
+                "no_b_display": _display_price(row.get("no_b")),
                 "volume_a_display": _display_number(row.get("volume_a")),
                 "volume_b_display": _display_number(row.get("volume_b")),
+                "liquidity_a_display": _display_number(row.get("liquidity_a")),
+                "liquidity_b_display": _display_number(row.get("liquidity_b")),
                 "price_difference_display": (
                     f"{float(row.get('price_difference') or 0):.1%}"
                 ),
-                "score_display": f"{score:.0%}",
-                "score_width": round(score * 100, 1),
-                "shared_terms_display": ", ".join(row.get("shared_core_terms") or row.get("shared_terms") or []),
+                "score_display": "Verified",
+                "score_width": 100,
+                "confidence_display": f"{confidence:.0%}",
+                "semantic_summary": semantic_summary or "Exact canonical semantic key",
+                "canonical_key_display": str(row.get("canonical_key") or ""),
             }
         )
+
     return output
 
 
-def _matcher_export_url(
+def _semantic_matcher_export_url(
     *,
     platform_a: str,
     platform_b: str,
     keyword: str,
-    minimum_score: float,
-    minimum_shared_terms: int,
     minimum_price_difference: float,
-    markets_per_platform: int,
     result_limit: int,
 ) -> str:
     return "/explorer/matcher/export?" + urlencode(
@@ -1049,10 +977,7 @@ def _matcher_export_url(
             "platform_a": platform_a,
             "platform_b": platform_b,
             "keyword": keyword,
-            "minimum_score": minimum_score,
-            "minimum_shared_terms": minimum_shared_terms,
             "minimum_price_difference": minimum_price_difference,
-            "markets_per_platform": markets_per_platform,
             "result_limit": result_limit,
         }
     )
@@ -1578,10 +1503,7 @@ def explorer_matcher(
     platform_a: str = Query(default="", max_length=50),
     platform_b: str = Query(default="", max_length=50),
     keyword: str = Query(default="", max_length=100),
-    minimum_score: float = Query(default=0.58, ge=0.20, le=1.0),
-    minimum_shared_terms: int = Query(default=2, ge=1, le=6),
     minimum_price_difference: float = Query(default=0.0, ge=0.0, le=1.0),
-    markets_per_platform: int = Query(default=35, ge=10, le=60),
     result_limit: int = Query(default=40, ge=10, le=100),
 ):
     error: Optional[str] = None
@@ -1592,36 +1514,36 @@ def explorer_matcher(
     candidate_count_b = 0
 
     try:
-        with _connect() as connection:
-            latest_snapshot = _latest_snapshot(connection)
-            platforms = _platforms(connection, latest_snapshot)
+        with _connect_semantics() as connection:
+            latest_snapshot = _semantic_latest_snapshot(connection)
+            platforms = _semantic_platforms(connection)
 
             if not platform_a and platforms:
                 platform_a = platforms[0]
             if not platform_b and len(platforms) > 1:
                 platform_b = platforms[1]
 
-            if platform_a and platform_b and platform_a.lower() != platform_b.lower():
-                left_rows = _matcher_candidates(
+            if (
+                platform_a
+                and platform_b
+                and platform_a.lower() != platform_b.lower()
+            ):
+                candidate_count_a = _semantic_candidate_count(
                     connection,
                     platform=platform_a,
                     keyword=keyword,
-                    limit=markets_per_platform,
                 )
-                right_rows = _matcher_candidates(
+                candidate_count_b = _semantic_candidate_count(
                     connection,
                     platform=platform_b,
                     keyword=keyword,
-                    limit=markets_per_platform,
                 )
-                candidate_count_a = len(left_rows)
-                candidate_count_b = len(right_rows)
-                rows = _decorate_match_rows(
-                    _match_markets(
-                        left_rows,
-                        right_rows,
-                        minimum_score=minimum_score,
-                        minimum_shared_terms=minimum_shared_terms,
+                rows = _decorate_semantic_match_rows(
+                    _semantic_matches(
+                        connection,
+                        platform_a=platform_a,
+                        platform_b=platform_b,
+                        keyword=keyword,
                         minimum_price_difference=minimum_price_difference,
                         result_limit=result_limit,
                     )
@@ -1651,20 +1573,14 @@ def explorer_matcher(
                 "platform_a": platform_a,
                 "platform_b": platform_b,
                 "keyword": keyword,
-                "minimum_score": minimum_score,
-                "minimum_shared_terms": minimum_shared_terms,
                 "minimum_price_difference": minimum_price_difference,
-                "markets_per_platform": markets_per_platform,
                 "result_limit": result_limit,
             },
-            "export_url": _matcher_export_url(
+            "export_url": _semantic_matcher_export_url(
                 platform_a=platform_a,
                 platform_b=platform_b,
                 keyword=keyword,
-                minimum_score=minimum_score,
-                minimum_shared_terms=minimum_shared_terms,
                 minimum_price_difference=minimum_price_difference,
-                markets_per_platform=markets_per_platform,
                 result_limit=result_limit,
             ),
         },
@@ -1676,30 +1592,15 @@ def export_matcher(
     platform_a: str = Query(..., max_length=50),
     platform_b: str = Query(..., max_length=50),
     keyword: str = Query(default="", max_length=100),
-    minimum_score: float = Query(default=0.58, ge=0.20, le=1.0),
-    minimum_shared_terms: int = Query(default=2, ge=1, le=6),
     minimum_price_difference: float = Query(default=0.0, ge=0.0, le=1.0),
-    markets_per_platform: int = Query(default=35, ge=10, le=60),
     result_limit: int = Query(default=100, ge=10, le=250),
 ):
-    with _connect() as connection:
-        left_rows = _matcher_candidates(
+    with _connect_semantics() as connection:
+        rows = _semantic_matches(
             connection,
-            platform=platform_a,
+            platform_a=platform_a,
+            platform_b=platform_b,
             keyword=keyword,
-            limit=markets_per_platform,
-        )
-        right_rows = _matcher_candidates(
-            connection,
-            platform=platform_b,
-            keyword=keyword,
-            limit=markets_per_platform,
-        )
-        rows = _match_markets(
-            left_rows,
-            right_rows,
-            minimum_score=minimum_score,
-            minimum_shared_terms=minimum_shared_terms,
             minimum_price_difference=minimum_price_difference,
             result_limit=result_limit,
         )
@@ -1710,28 +1611,33 @@ def export_matcher(
         "market_id_a",
         "title_a",
         "yes_a",
+        "no_a",
         "volume_a",
+        "liquidity_a",
         "platform_b",
         "market_id_b",
         "title_b",
         "yes_b",
+        "no_b",
         "volume_b",
-        "score",
+        "liquidity_b",
+        "event_type",
+        "primary_entity",
+        "secondary_entity",
+        "competition",
+        "target",
+        "canonical_key",
+        "confidence",
         "price_difference",
-        "shared_terms",
-        "shared_core_terms",
-        "intent_family",
         "url_a",
         "url_b",
     ]
+
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
-        csv_row = dict(row)
-        csv_row["shared_terms"] = ", ".join(row.get("shared_terms") or [])
-        csv_row["shared_core_terms"] = ", ".join(row.get("shared_core_terms") or [])
         writer.writerow(
-            {key: _safe_csv_value(csv_row.get(key)) for key in fieldnames}
+            {key: _safe_csv_value(row.get(key)) for key in fieldnames}
         )
 
     return Response(
@@ -1739,10 +1645,11 @@ def export_matcher(
         media_type="text/csv",
         headers={
             "Content-Disposition": (
-                'attachment; filename="prediction_market_matches.csv"'
+                'attachment; filename="verified_prediction_market_matches.csv"'
             )
         },
     )
+
 
 @router.get("/{tool_slug}")
 def explorer_placeholder(request: Request, tool_slug: str):
