@@ -542,12 +542,29 @@ def main() -> None:
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY platform ORDER BY COALESCE(volume,0) DESC,snapshot_time DESC) platform_rank
                 FROM latest_unique WHERE market_rank=1
             )
-            SELECT platform,market_id,title,category,start_date,close_date,resolution_date,close_time,raw_url,yes_price,no_price,volume,liquidity,status,snapshot_time
+            SELECT
+                platform,
+                market_id,
+                title,
+                category,
+                start_date,
+                close_date,
+                resolution_date,
+                close_time,
+                raw_url,
+                yes_price,
+                no_price,
+                volume,
+                liquidity,
+                status,
+                snapshot_time
+            FROM capped
             WHERE platform_rank <=
-            CASE
-                WHEN LOWER(platform) = 'kalshi' THEN 5000
-                ELSE 2000
-            END
+                CASE
+                    WHEN LOWER(platform) = 'kalshi' THEN 5000
+                    ELSE 2000
+                END
+            ORDER BY platform, platform_rank
             """
         )
 
