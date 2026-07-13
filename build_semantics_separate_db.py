@@ -13,7 +13,7 @@ WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "semantic-live-separate-db-v3"
+PARSER_VERSION = "semantic-active-pool-v4"
 
 
 COUNTRY_ALIASES = {
@@ -329,6 +329,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         row.get("liquidity"),
         row.get("status"),
         row.get("snapshot_time"),
+        year,
         PARSER_VERSION,
     )
 
@@ -359,6 +360,7 @@ CREATE TABLE market_semantics_live (
     liquidity DOUBLE,
     status VARCHAR,
     snapshot_time TIMESTAMP WITH TIME ZONE,
+    event_year VARCHAR,
     parser_version VARCHAR,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (platform, market_id)
@@ -392,11 +394,12 @@ INSERT INTO market_semantics_live (
     liquidity,
     status,
     snapshot_time,
+    event_year,
     parser_version,
     updated_at
 )
 VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     CURRENT_TIMESTAMP
 )
 """
@@ -421,36 +424,17 @@ def main() -> None:
     try:
         cursor = connection.execute(
             """
-            WITH latest_per_platform AS (
-                SELECT
-                    platform,
-                    MAX(snapshot_time) AS latest_snapshot
+            WITH latest_unique AS (
+                SELECT platform,market_id,title,category,start_date,close_date,resolution_date,close_time,raw_url,yes_price,no_price,volume,liquidity,status,snapshot_time,
+                       ROW_NUMBER() OVER(PARTITION BY platform,market_id ORDER BY snapshot_time DESC) market_rank
                 FROM warehouse.market_snapshots
-                WHERE platform IS NOT NULL
-                GROUP BY platform
+                WHERE market_id IS NOT NULL AND LOWER(COALESCE(status,'active')) NOT IN ('closed','resolved','settled','cancelled','canceled')
+            ), capped AS (
+                SELECT *, ROW_NUMBER() OVER(PARTITION BY platform ORDER BY COALESCE(volume,0) DESC,snapshot_time DESC) platform_rank
+                FROM latest_unique WHERE market_rank=1
             )
-            SELECT
-                market.platform,
-                market.market_id,
-                market.title,
-                market.category,
-                market.start_date,
-                market.close_date,
-                market.resolution_date,
-                market.close_time,
-                market.raw_url,
-                market.yes_price,
-                market.no_price,
-                market.volume,
-                market.liquidity,
-                market.status,
-                market.snapshot_time
-            FROM warehouse.market_snapshots AS market
-            INNER JOIN latest_per_platform AS latest
-              ON market.platform = latest.platform
-             AND market.snapshot_time = latest.latest_snapshot
-            WHERE market.market_id IS NOT NULL
-            ORDER BY market.platform, market.market_id
+            SELECT platform,market_id,title,category,start_date,close_date,resolution_date,close_time,raw_url,yes_price,no_price,volume,liquidity,status,snapshot_time
+            FROM capped WHERE platform_rank<=2000 ORDER BY platform,platform_rank
             """
         )
 
