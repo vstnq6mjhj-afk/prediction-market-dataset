@@ -13,7 +13,7 @@ WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "semantic-adapters-v5"
+PARSER_VERSION = "semantic-adapters-v6-kalshi-safety"
 
 
 COUNTRY_ALIASES = {
@@ -208,19 +208,42 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     matchable = False
     notes = "No reliable deterministic semantic pattern found."
 
+    raw_title_lower = raw_title.lower()
+    kalshi_leg_markers = re.findall(
+        r"(?:^|,)\\s*(?:yes|no)\\s+",
+        raw_title_lower,
+    )
+    kalshi_multi_leg = (
+        platform == "kalshi"
+        and (
+            "multigame" in market_id.lower()
+            or "parlay" in market_id.lower()
+            or len(kalshi_leg_markers) >= 2
+        )
+    )
+    kalshi_prefixed_contract = (
+        platform == "kalshi"
+        and re.match(r"^\\s*(?:yes|no)\\s+", raw_title_lower) is not None
+    )
+
     # Kalshi multi-leg products must never be treated as a single-market equivalent.
-    if platform == "kalshi" and (
-        "multigame" in market_id.lower()
-        or title.startswith("yes ")
-        or ",yes " in title
-    ):
+    if kalshi_multi_leg:
         event_type = "multi_leg_parlay"
         outcome_type = "multi_leg"
-        target = "all_legs_yes"
+        target = "all_legs"
         confidence = 0.99
-        notes = "Kalshi multi-leg market excluded from automatic matching."
+        notes = "Kalshi comma-separated YES/NO bundle excluded from automatic matching."
 
-    # Kalshi single-market titles are parsed with ticker family hints only as support.
+    # A single prefixed Kalshi contract still lacks enough event context in the
+    # current warehouse schema to match safely.
+    elif kalshi_prefixed_contract:
+        event_type = "kalshi_contract_leg"
+        outcome_type = "contract_leg"
+        confidence = 0.99
+        notes = "Kalshi YES/NO-prefixed contract excluded until event metadata is retained."
+
+    # Kalshi single-market titles without YES/NO bundle prefixes are parsed
+    # with ticker family hints only as support.
     elif platform == "kalshi":
         family_hint, _ = parse_kalshi_ticker_context(market_id)
 
@@ -382,7 +405,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     if not matchable:
         if event_type == "multi_leg_parlay":
             exclusion_reason = "multi_leg"
-        elif event_type in {"unknown", "kalshi_binary", "contract_outcome"}:
+        elif event_type in {"unknown", "kalshi_binary", "kalshi_contract_leg", "contract_outcome"}:
             exclusion_reason = "unsupported_structure"
         else:
             exclusion_reason = "insufficient_fields"
@@ -530,14 +553,6 @@ def main() -> None:
                        ROW_NUMBER() OVER(PARTITION BY platform,market_id ORDER BY snapshot_time DESC) market_rank
                 FROM warehouse.market_snapshots
                 WHERE market_id IS NOT NULL
-                AND NOT (
-                    LOWER(platform) = 'kalshi'
-                    AND (
-                        LOWER(market_id) LIKE '%multigame%'
-                        OR LOWER(COALESCE(title, '')) LIKE 'yes %,%'
-                        OR LOWER(COALESCE(title, '')) LIKE '%,yes %'
-                    )
-                )
             ), capped AS (
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY platform ORDER BY COALESCE(volume,0) DESC,snapshot_time DESC) platform_rank
                 FROM latest_unique WHERE market_rank=1
