@@ -840,6 +840,30 @@ def _semantic_candidate_count(
     )
 
 
+
+def _semantic_diagnostics(
+    connection: duckdb.DuckDBPyConnection,
+) -> List[Dict[str, Any]]:
+    try:
+        cursor = connection.execute(
+            """
+            SELECT
+                platform,
+                parsed,
+                matchable,
+                excluded_multi_leg,
+                unsupported_structure,
+                insufficient_fields,
+                latest_snapshot
+            FROM matcher_diagnostics
+            ORDER BY platform
+            """
+        )
+        return _rows_as_dicts(cursor)
+    except Exception:
+        return []
+
+
 def _semantic_matches(
     connection: duckdb.DuckDBPyConnection,
     *, platform_a: str, platform_b: str, keyword: str,
@@ -899,9 +923,29 @@ def _semantic_matches(
              AND COALESCE(a.target,'')=COALESCE(b.target,'')
             WHERE a.is_matchable=TRUE AND b.is_matchable=TRUE {keyword_sql}
         )
-        SELECT * FROM pairs
-        WHERE match_status<>'rejected' {review_sql}
-          AND price_difference>=?
+        , ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        match_status,
+                        event_type,
+                        COALESCE(primary_entity, ''),
+                        COALESCE(secondary_entity, ''),
+                        COALESCE(competition, ''),
+                        COALESCE(event_year, ''),
+                        COALESCE(target, '')
+                    ORDER BY
+                        GREATEST(COALESCE(volume_a, 0), COALESCE(volume_b, 0)) DESC,
+                        parser_confidence DESC,
+                        price_difference DESC
+                ) AS duplicate_rank
+            FROM pairs
+            WHERE match_status <> 'rejected' {review_sql}
+              AND price_difference >= ?
+        )
+        SELECT * FROM ranked
+        WHERE duplicate_rank = 1
         ORDER BY CASE match_status WHEN 'verified' THEN 1 WHEN 'high_confidence' THEN 2 WHEN 'needs_review' THEN 3 ELSE 4 END,
                  parser_confidence DESC, price_difference DESC
         LIMIT ?
@@ -1482,11 +1526,13 @@ def explorer_matcher(
     latest_snapshot: Optional[Any] = None
     candidate_count_a = 0
     candidate_count_b = 0
+    diagnostics: List[Dict[str, Any]] = []
 
     try:
         with _connect_semantics() as connection:
             latest_snapshot = _semantic_latest_snapshot(connection)
             platforms = _semantic_platforms(connection)
+            diagnostics = _semantic_diagnostics(connection)
 
             if not platform_a and platforms:
                 platform_a = platforms[0]
@@ -1538,6 +1584,7 @@ def explorer_matcher(
             "latest_snapshot": _display_datetime(latest_snapshot),
             "candidate_count_a": candidate_count_a,
             "candidate_count_b": candidate_count_b,
+            "diagnostics": diagnostics,
             "same_platform": same_platform,
             "error": error,
             "filters": {

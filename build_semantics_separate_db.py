@@ -13,7 +13,7 @@ WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "semantic-active-pool-v4"
+PARSER_VERSION = "semantic-adapters-v5"
 
 
 COUNTRY_ALIASES = {
@@ -134,6 +134,54 @@ def parse_range_contract(text: str):
     return None, None, None
 
 
+
+def classify_parent_question(parent: str, contract: str, year: Optional[str]):
+    """Parse PredictIt parent-question + contract structures conservatively."""
+    parent_text = normalize_text(parent)
+    contract_entity = normalize_entity(contract)
+
+    if not contract_entity:
+        return None
+
+    if "who will win" in parent_text or "who wins" in parent_text:
+        competition_text = re.sub(r"^.*?who\s+(?:will\s+)?win\s+", "", parent_text)
+        competition = normalize_competition(competition_text, year)
+        if "nomination" in parent_text:
+            event_type = "nomination_winner"
+        elif "election" in parent_text:
+            event_type = "election_winner"
+        elif any(term in parent_text for term in ("world cup", "championship", "tournament", "league")):
+            event_type = "tournament_winner"
+        else:
+            event_type = "event_winner"
+        return event_type, contract_entity, competition, "winner", 0.93
+
+    if "presidential nomination" in parent_text:
+        return "nomination_winner", contract_entity, normalize_competition(parent_text, year), "winner", 0.92
+
+    if "presidential election" in parent_text or "elected president" in parent_text:
+        return "election_winner", contract_entity, normalize_competition(parent_text, year), "winner", 0.92
+
+    return None
+
+
+def parse_kalshi_ticker_context(market_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract only safe family hints from Kalshi ticker prefixes."""
+    ticker = str(market_id or "").upper()
+    if "PRES" in ticker or "ELECT" in ticker:
+        return "election", None
+    if "NOM" in ticker:
+        return "nomination", None
+    if "WORLD" in ticker or "WCUP" in ticker:
+        return "world_cup", None
+    if "NBA" in ticker:
+        return "nba", None
+    if "NFL" in ticker:
+        return "nfl", None
+    if "MLB" in ticker:
+        return "mlb", None
+    return None, None
+
 def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     platform = normalize_text(row["platform"])
     market_id = str(row["market_id"])
@@ -172,23 +220,64 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         confidence = 0.99
         notes = "Kalshi multi-leg market excluded from automatic matching."
 
+    # Kalshi single-market titles are parsed with ticker family hints only as support.
+    elif platform == "kalshi":
+        family_hint, _ = parse_kalshi_ticker_context(market_id)
+
+        kalshi_winner = re.search(
+            r"(?:will\s+)?(.+?)\s+(?:win|wins|to win)\s+(?:the\s+)?(?:20\d{2}\s+)?(.+?)(?:\?|$)",
+            title,
+        )
+        kalshi_yes_no = re.search(r"will\s+(.+?)(?:\?|$)", title)
+
+        if kalshi_winner:
+            primary = normalize_entity(kalshi_winner.group(1))
+            competition_text = kalshi_winner.group(2).strip()
+            competition = normalize_competition(competition_text, year)
+            if "nomination" in competition_text or family_hint == "nomination":
+                event_type = "nomination_winner"
+            elif "election" in competition_text or family_hint == "election":
+                event_type = "election_winner"
+            elif any(term in competition_text for term in ("world cup", "championship", "tournament", "league")):
+                event_type = "tournament_winner"
+            else:
+                event_type = "event_winner"
+            target = "winner"
+            confidence = 0.90
+            matchable = bool(primary and competition)
+            notes = "Kalshi single winner market parsed."
+        elif kalshi_yes_no and family_hint in {"election", "nomination", "world_cup"}:
+            # Keep as unsupported unless the title itself reveals a compatible outcome.
+            event_type = "kalshi_binary"
+            primary = normalize_entity(kalshi_yes_no.group(1))
+            confidence = 0.55
+            notes = "Kalshi ticker family identified, but outcome structure is not yet safe to match."
+
     # PredictIt parent question and contract are separated by a pipe.
     elif platform == "predictit" and "|" in raw_title:
         parent, contract = [part.strip() for part in raw_title.split("|", 1)]
         operator, lower, upper = parse_range_contract(contract)
-        primary = slug(parent)
-        target = slug(contract)
 
         if operator:
             event_type = "range_contract"
             outcome_type = "range"
+            primary = slug(parent)
+            target = slug(contract)
             confidence = 0.96
             matchable = True
             notes = "PredictIt numeric range contract parsed."
         else:
-            event_type = "contract_outcome"
-            confidence = 0.75
-            notes = "PredictIt contract parsed but requires review."
+            parsed_parent = classify_parent_question(parent, contract, year)
+            if parsed_parent:
+                event_type, primary, competition, target, confidence = parsed_parent
+                matchable = True
+                notes = "PredictIt parent event and contract outcome parsed."
+            else:
+                event_type = "contract_outcome"
+                primary = slug(parent)
+                target = slug(contract)
+                confidence = 0.75
+                notes = "PredictIt contract parsed but requires review."
 
     else:
         # Head-to-head winner:
@@ -289,6 +378,15 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
                 matchable = bool(primary and secondary)
                 notes = "Relative deadline market parsed."
 
+    exclusion_reason = None
+    if not matchable:
+        if event_type == "multi_leg_parlay":
+            exclusion_reason = "multi_leg"
+        elif event_type in {"unknown", "kalshi_binary", "contract_outcome"}:
+            exclusion_reason = "unsupported_structure"
+        else:
+            exclusion_reason = "insufficient_fields"
+
     canonical_key = None
     if matchable:
         canonical_key = "|".join(
@@ -330,6 +428,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         row.get("status"),
         row.get("snapshot_time"),
         year,
+        exclusion_reason,
         PARSER_VERSION,
     )
 
@@ -361,6 +460,7 @@ CREATE TABLE market_semantics_live (
     status VARCHAR,
     snapshot_time TIMESTAMP WITH TIME ZONE,
     event_year VARCHAR,
+    exclusion_reason VARCHAR,
     parser_version VARCHAR,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (platform, market_id)
@@ -395,11 +495,12 @@ INSERT INTO market_semantics_live (
     status,
     snapshot_time,
     event_year,
+    exclusion_reason,
     parser_version,
     updated_at
 )
 VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     CURRENT_TIMESTAMP
 )
 """
@@ -446,6 +547,21 @@ def main() -> None:
         for row in parsed:
             connection.execute(INSERT_SQL, row)
 
+        connection.execute(
+            """
+            CREATE TABLE matcher_diagnostics AS
+            SELECT
+                platform,
+                COUNT(*) AS parsed,
+                COUNT(*) FILTER (WHERE is_matchable = TRUE) AS matchable,
+                COUNT(*) FILTER (WHERE exclusion_reason = 'multi_leg') AS excluded_multi_leg,
+                COUNT(*) FILTER (WHERE exclusion_reason = 'unsupported_structure') AS unsupported_structure,
+                COUNT(*) FILTER (WHERE exclusion_reason = 'insufficient_fields') AS insufficient_fields,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM market_semantics_live
+            GROUP BY platform
+            """
+        )
         connection.execute("CHECKPOINT")
 
         summary = connection.execute(

@@ -45,6 +45,28 @@
     </article>
 </section>
 
+{% if diagnostics %}
+<section class="coverage-panel">
+    <div class="coverage-heading">
+        <div>
+            <span>Platform diagnostics</span>
+            <strong>Why coverage differs by platform</strong>
+        </div>
+    </div>
+    <div class="coverage-grid">
+        {% for item in diagnostics %}
+        <article class="coverage-card">
+            <h3>{{ item.platform|title }}</h3>
+            <div><span>Parsed</span><strong>{{ item.parsed }}</strong></div>
+            <div><span>Matchable</span><strong>{{ item.matchable }}</strong></div>
+            <div><span>Multi-leg excluded</span><strong>{{ item.excluded_multi_leg }}</strong></div>
+            <div><span>Unsupported</span><strong>{{ item.unsupported_structure }}</strong></div>
+            <div><span>Incomplete fields</span><strong>{{ item.insufficient_fields }}</strong></div>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+
 <form class="filter-panel matcher-filter-panel semantic-filter-panel" method="get" action="/explorer/matcher">
     <label>
         <span>Platform A</span>
