@@ -805,7 +805,7 @@ def _semantic_latest_snapshot(
     connection: duckdb.DuckDBPyConnection,
 ) -> Any:
     row = connection.execute(
-        "SELECT MAX(snapshot_time) FROM market_semantics_live"
+        "SELECT MAX(snapshot_time) FROM event_contracts"
     ).fetchone()
     return row[0] if row else None
 
@@ -817,9 +817,9 @@ def _semantic_candidate_count(
     keyword: str,
 ) -> int:
     conditions = [
-        "is_matchable = TRUE",
         "LOWER(platform) = LOWER(?)",
-        "canonical_key IS NOT NULL",
+        "event_key IS NOT NULL",
+        "contract_key IS NOT NULL",
     ]
     params: List[Any] = [platform]
 
@@ -831,7 +831,7 @@ def _semantic_candidate_count(
         connection.execute(
             f"""
             SELECT COUNT(*)
-            FROM market_semantics_live
+            FROM event_contracts
             WHERE {" AND ".join(conditions)}
             """,
             params,
@@ -854,6 +854,8 @@ def _semantic_diagnostics(
                 excluded_multi_leg,
                 unsupported_structure,
                 insufficient_fields,
+                canonical_events,
+                event_contracts,
                 latest_snapshot
             FROM matcher_diagnostics
             ORDER BY platform
@@ -866,113 +868,222 @@ def _semantic_diagnostics(
 
 def _semantic_matches(
     connection: duckdb.DuckDBPyConnection,
-    *, platform_a: str, platform_b: str, keyword: str,
-    minimum_price_difference: float, result_limit: int,
+    *,
+    platform_a: str,
+    platform_b: str,
+    keyword: str,
+    minimum_price_difference: float,
+    result_limit: int,
     include_review: bool,
 ) -> List[Dict[str, Any]]:
     keyword_sql = ""
     params: List[Any] = [platform_a, platform_b]
+
     if keyword.strip():
         keyword_sql = """
-          AND (LOWER(COALESCE(a.raw_title, '')) LIKE ?
-            OR LOWER(COALESCE(b.raw_title, '')) LIKE ?)
+          AND (
+                LOWER(COALESCE(a.raw_title, '')) LIKE ?
+             OR LOWER(COALESCE(b.raw_title, '')) LIKE ?
+             OR LOWER(COALESCE(a.event_label, '')) LIKE ?
+             OR LOWER(COALESCE(b.event_label, '')) LIKE ?
+          )
         """
         value = f"%{keyword.strip().lower()}%"
-        params.extend([value, value])
+        params.extend([value, value, value, value])
+
     review_sql = "" if include_review else "AND match_status <> 'needs_review'"
     params.extend([minimum_price_difference, result_limit])
-    cursor = connection.execute(f"""
+
+    cursor = connection.execute(
+        f"""
         WITH pairs AS (
             SELECT
-                a.platform platform_a, a.market_id market_id_a,
-                a.raw_title title_a, a.yes_price yes_a, a.no_price no_a,
-                a.volume volume_a, a.liquidity liquidity_a, a.source_url url_a,
-                b.platform platform_b, b.market_id market_id_b,
-                b.raw_title title_b, b.yes_price yes_b, b.no_price no_b,
-                b.volume volume_b, b.liquidity liquidity_b, b.source_url url_b,
-                a.event_type, a.primary_entity, a.secondary_entity,
-                a.competition, a.target, a.event_year,
-                a.canonical_key canonical_key_a,
-                b.canonical_key canonical_key_b,
-                LEAST(COALESCE(a.extraction_confidence,0),
-                      COALESCE(b.extraction_confidence,0)) parser_confidence,
-                ABS(COALESCE(a.yes_price,0)-COALESCE(b.yes_price,0)) price_difference,
+                a.platform AS platform_a,
+                a.market_id AS market_id_a,
+                a.raw_title AS title_a,
+                a.yes_price AS yes_a,
+                a.no_price AS no_a,
+                a.volume AS volume_a,
+                a.liquidity AS liquidity_a,
+                a.source_url AS url_a,
+
+                b.platform AS platform_b,
+                b.market_id AS market_id_b,
+                b.raw_title AS title_b,
+                b.yes_price AS yes_b,
+                b.no_price AS no_b,
+                b.volume AS volume_b,
+                b.liquidity AS liquidity_b,
+                b.source_url AS url_b,
+
+                a.event_type,
+                a.event_label,
+                a.contract_label,
+                a.event_year,
+                a.event_key AS event_key_a,
+                b.event_key AS event_key_b,
+                a.event_core_key AS event_core_key_a,
+                b.event_core_key AS event_core_key_b,
+                a.contract_key AS contract_key_a,
+                b.contract_key AS contract_key_b,
+
+                LEAST(
+                    COALESCE(a.extraction_confidence, 0),
+                    COALESCE(b.extraction_confidence, 0)
+                ) AS parser_confidence,
+
+                ABS(
+                    COALESCE(a.yes_price, 0)
+                    - COALESCE(b.yes_price, 0)
+                ) AS price_difference,
+
                 CASE
-                  WHEN a.canonical_key=b.canonical_key THEN 'verified'
-                  WHEN a.event_type=b.event_type
-                   AND COALESCE(a.primary_entity,'')=COALESCE(b.primary_entity,'')
-                   AND COALESCE(a.secondary_entity,'')=COALESCE(b.secondary_entity,'')
-                   AND COALESCE(a.target,'')=COALESCE(b.target,'')
-                   AND (COALESCE(a.event_year,'')=COALESCE(b.event_year,'') OR a.event_year IS NULL OR b.event_year IS NULL)
-                   AND (COALESCE(a.competition,'')=COALESCE(b.competition,'') OR a.competition IS NULL OR b.competition IS NULL)
-                   AND COALESCE(a.lower_threshold,-999999999)=COALESCE(b.lower_threshold,-999999999)
-                   AND COALESCE(a.upper_threshold,999999999)=COALESCE(b.upper_threshold,999999999)
-                    THEN 'high_confidence'
-                  WHEN a.event_type=b.event_type
-                   AND COALESCE(a.primary_entity,'')=COALESCE(b.primary_entity,'')
-                   AND COALESCE(a.target,'')=COALESCE(b.target,'')
-                    THEN 'needs_review'
-                  ELSE 'rejected'
-                END match_status
-            FROM market_semantics_live a
-            JOIN market_semantics_live b
-              ON LOWER(a.platform)=LOWER(?) AND LOWER(b.platform)=LOWER(?)
-             AND a.platform<>b.platform AND a.market_id<>b.market_id
-             AND a.event_type=b.event_type
-             AND COALESCE(a.primary_entity,'')=COALESCE(b.primary_entity,'')
-             AND COALESCE(a.target,'')=COALESCE(b.target,'')
-            WHERE a.is_matchable=TRUE AND b.is_matchable=TRUE {keyword_sql}
-        )
-        , ranked AS (
+                    WHEN a.event_key = b.event_key
+                     AND a.contract_key = b.contract_key
+                        THEN 'verified'
+
+                    WHEN a.event_core_key = b.event_core_key
+                     AND a.contract_key = b.contract_key
+                     AND (
+                            COALESCE(a.event_year, '') =
+                            COALESCE(b.event_year, '')
+                         OR a.event_year IS NULL
+                         OR b.event_year IS NULL
+                     )
+                        THEN 'high_confidence'
+
+                    WHEN a.event_type = b.event_type
+                     AND a.contract_key = b.contract_key
+                        THEN 'needs_review'
+
+                    ELSE 'rejected'
+                END AS match_status
+            FROM event_contracts a
+            JOIN event_contracts b
+              ON LOWER(a.platform) = LOWER(?)
+             AND LOWER(b.platform) = LOWER(?)
+             AND a.platform <> b.platform
+             AND a.market_id <> b.market_id
+             AND a.event_type = b.event_type
+             AND a.contract_key = b.contract_key
+            WHERE 1 = 1
+              {keyword_sql}
+        ),
+        ranked AS (
             SELECT
                 *,
                 ROW_NUMBER() OVER (
                     PARTITION BY
                         match_status,
-                        event_type,
-                        COALESCE(primary_entity, ''),
-                        COALESCE(secondary_entity, ''),
-                        COALESCE(competition, ''),
-                        COALESCE(event_year, ''),
-                        COALESCE(target, '')
+                        event_key_a,
+                        event_key_b,
+                        contract_key_a
                     ORDER BY
-                        GREATEST(COALESCE(volume_a, 0), COALESCE(volume_b, 0)) DESC,
+                        CASE match_status
+                            WHEN 'verified' THEN 1
+                            WHEN 'high_confidence' THEN 2
+                            WHEN 'needs_review' THEN 3
+                            ELSE 4
+                        END,
+                        GREATEST(
+                            COALESCE(volume_a, 0),
+                            COALESCE(volume_b, 0)
+                        ) DESC,
                         parser_confidence DESC,
                         price_difference DESC
                 ) AS duplicate_rank
             FROM pairs
-            WHERE match_status <> 'rejected' {review_sql}
+            WHERE match_status <> 'rejected'
+              {review_sql}
               AND price_difference >= ?
         )
-        SELECT * FROM ranked
+        SELECT *
+        FROM ranked
         WHERE duplicate_rank = 1
-        ORDER BY CASE match_status WHEN 'verified' THEN 1 WHEN 'high_confidence' THEN 2 WHEN 'needs_review' THEN 3 ELSE 4 END,
-                 parser_confidence DESC, price_difference DESC
+        ORDER BY
+            CASE match_status
+                WHEN 'verified' THEN 1
+                WHEN 'high_confidence' THEN 2
+                WHEN 'needs_review' THEN 3
+                ELSE 4
+            END,
+            parser_confidence DESC,
+            price_difference DESC
         LIMIT ?
-    """, params)
+        """,
+        params,
+    )
     return _rows_as_dicts(cursor)
 
-def _decorate_semantic_match_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    output=[]
-    labels={"verified":("Verified","verified"),"high_confidence":("High confidence","high-confidence"),"needs_review":("Needs review","needs-review")}
+def _decorate_semantic_match_rows(
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    labels = {
+        "verified": ("Verified", "verified"),
+        "high_confidence": ("High confidence", "high-confidence"),
+        "needs_review": ("Needs review", "needs-review"),
+    }
+
     for row in rows:
-        status=str(row.get("match_status") or "needs_review")
-        label, css_class=labels.get(status,("Needs review","needs-review"))
-        confidence=float(row.get("parser_confidence") or 0)
-        parts=[row.get("event_type"),row.get("primary_entity"),row.get("secondary_entity"),row.get("competition"),row.get("event_year"),row.get("target")]
-        summary=" · ".join(str(x).replace("_"," ").title() for x in parts if x)
-        output.append({**row,
-          "platform_a_display":str(row.get("platform_a") or "Unknown").title(),
-          "platform_b_display":str(row.get("platform_b") or "Unknown").title(),
-          "yes_a_display":_display_price(row.get("yes_a")),"yes_b_display":_display_price(row.get("yes_b")),
-          "no_a_display":_display_price(row.get("no_a")),"no_b_display":_display_price(row.get("no_b")),
-          "volume_a_display":_display_number(row.get("volume_a")),"volume_b_display":_display_number(row.get("volume_b")),
-          "liquidity_a_display":_display_number(row.get("liquidity_a")),"liquidity_b_display":_display_number(row.get("liquidity_b")),
-          "price_difference_display":f"{float(row.get('price_difference') or 0):.1%}",
-          "status_label":label,"status_class":css_class,"confidence_display":f"{confidence:.0%}",
-          "semantic_summary":summary or "Compatible canonical semantics",
-          "canonical_key_a_display":str(row.get("canonical_key_a") or ""),
-          "canonical_key_b_display":str(row.get("canonical_key_b") or "")})
+        status = str(row.get("match_status") or "needs_review")
+        label, css_class = labels.get(
+            status,
+            ("Needs review", "needs-review"),
+        )
+        confidence = float(row.get("parser_confidence") or 0)
+
+        event_label = str(
+            row.get("event_label")
+            or row.get("event_type")
+            or "Canonical event"
+        ).replace("_", " ").title()
+        contract_label = str(
+            row.get("contract_label")
+            or "Contract"
+        ).replace("_", " ").title()
+
+        output.append(
+            {
+                **row,
+                "platform_a_display": str(
+                    row.get("platform_a") or "Unknown"
+                ).title(),
+                "platform_b_display": str(
+                    row.get("platform_b") or "Unknown"
+                ).title(),
+                "yes_a_display": _display_price(row.get("yes_a")),
+                "yes_b_display": _display_price(row.get("yes_b")),
+                "no_a_display": _display_price(row.get("no_a")),
+                "no_b_display": _display_price(row.get("no_b")),
+                "volume_a_display": _display_number(row.get("volume_a")),
+                "volume_b_display": _display_number(row.get("volume_b")),
+                "liquidity_a_display": _display_number(
+                    row.get("liquidity_a")
+                ),
+                "liquidity_b_display": _display_number(
+                    row.get("liquidity_b")
+                ),
+                "price_difference_display": (
+                    f"{float(row.get('price_difference') or 0):.1%}"
+                ),
+                "status_label": label,
+                "status_class": css_class,
+                "confidence_display": f"{confidence:.0%}",
+                "semantic_summary": (
+                    f"{event_label} · Contract: {contract_label}"
+                ),
+                "canonical_key_a_display": (
+                    f"event={row.get('event_key_a') or ''} "
+                    f":: contract={row.get('contract_key_a') or ''}"
+                ),
+                "canonical_key_b_display": (
+                    f"event={row.get('event_key_b') or ''} "
+                    f":: contract={row.get('contract_key_b') or ''}"
+                ),
+            }
+        )
+
     return output
 
 def _semantic_matcher_export_url(
@@ -1629,6 +1740,7 @@ def export_matcher(
 
     buffer = io.StringIO()
     fieldnames = [
+        "match_status",
         "platform_a",
         "market_id_a",
         "title_a",
@@ -1644,12 +1756,14 @@ def export_matcher(
         "volume_b",
         "liquidity_b",
         "event_type",
-        "primary_entity",
-        "secondary_entity",
-        "competition",
-        "target",
-        "canonical_key",
-        "confidence",
+        "event_label",
+        "contract_label",
+        "event_year",
+        "event_key_a",
+        "event_key_b",
+        "contract_key_a",
+        "contract_key_b",
+        "parser_confidence",
         "price_difference",
         "url_a",
         "url_b",

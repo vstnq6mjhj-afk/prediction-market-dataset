@@ -4,11 +4,11 @@
 <a class="back-link" href="/explorer">← Back to Dataset Tools</a>
 
 <section class="hero compact">
-    <p class="eyebrow">Canonical cross-platform comparison</p>
+    <p class="eyebrow">Event-and-contract cross-platform comparison</p>
     <h1>Market Matcher</h1>
     <p class="hero-copy">
-        Verified and high-confidence semantic matches are shown.
-        Titles are used for display and optional filtering, never as the only matching decision.
+        The matcher confirms the parent event first, then compares compatible contracts.
+        Titles are used for display and filtering, never as the only matching decision.
     </p>
 </section>
 
@@ -28,7 +28,7 @@
 
 <section class="metric-grid matcher-metrics">
     <article class="metric-card">
-        <span>Verified matches</span>
+        <span>Matches shown</span>
         <strong>{{ rows|length }}</strong>
     </article>
     <article class="metric-card">
@@ -59,6 +59,8 @@
             <h3>{{ item.platform|title }}</h3>
             <div><span>Parsed</span><strong>{{ item.parsed }}</strong></div>
             <div><span>Matchable</span><strong>{{ item.matchable }}</strong></div>
+            <div><span>Canonical events</span><strong>{{ item.canonical_events }}</strong></div>
+            <div><span>Event contracts</span><strong>{{ item.event_contracts }}</strong></div>
             <div><span>Multi-leg excluded</span><strong>{{ item.excluded_multi_leg }}</strong></div>
             <div><span>Unsupported</span><strong>{{ item.unsupported_structure }}</strong></div>
             <div><span>Incomplete fields</span><strong>{{ item.insufficient_fields }}</strong></div>
@@ -145,7 +147,7 @@
         </div>
 
         <div class="semantic-proof">
-            <span>Canonical semantics</span>
+            <span>Canonical event and contract</span>
             <strong>{{ row.semantic_summary }}</strong>
             <code>A: {{ row.canonical_key_a_display }}</code>
             <code>B: {{ row.canonical_key_b_display }}</code>

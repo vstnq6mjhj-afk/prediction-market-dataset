@@ -13,7 +13,7 @@ WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "semantic-adapters-v6-kalshi-safety"
+PARSER_VERSION = "event-contract-model-v7"
 
 
 COUNTRY_ALIASES = {
@@ -210,7 +210,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
 
     raw_title_lower = raw_title.lower()
     kalshi_leg_markers = re.findall(
-        r"(?:^|,)\\s*(?:yes|no)\\s+",
+        r"(?:^|,)\s*(?:yes|no)\s+",
         raw_title_lower,
     )
     kalshi_multi_leg = (
@@ -223,7 +223,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     )
     kalshi_prefixed_contract = (
         platform == "kalshi"
-        and re.match(r"^\\s*(?:yes|no)\\s+", raw_title_lower) is not None
+        and re.match(r"^\s*(?:yes|no)\s+", raw_title_lower) is not None
     )
 
     # Kalshi multi-leg products must never be treated as a single-market equivalent.
@@ -593,19 +593,317 @@ def main() -> None:
 
         connection.execute(
             """
-            CREATE TABLE matcher_diagnostics AS
+            CREATE TABLE event_contracts AS
+            WITH enriched AS (
+                SELECT
+                    *,
+                    regexp_replace(
+                        COALESCE(competition, ''),
+                        '_20[0-9]{2}$',
+                        ''
+                    ) AS competition_base,
+
+                    CASE
+                        WHEN event_type IN (
+                            'tournament_winner',
+                            'election_winner',
+                            'nomination_winner',
+                            'event_winner'
+                        )
+                        THEN
+                            event_type || '|' ||
+                            regexp_replace(
+                                COALESCE(competition, ''),
+                                '_20[0-9]{2}$',
+                                ''
+                            ) || '|' ||
+                            COALESCE(event_year, '')
+
+                        WHEN event_type = 'head_to_head'
+                        THEN
+                            'head_to_head|' ||
+                            LEAST(
+                                COALESCE(primary_entity, ''),
+                                COALESCE(secondary_entity, '')
+                            ) || '|' ||
+                            GREATEST(
+                                COALESCE(primary_entity, ''),
+                                COALESCE(secondary_entity, '')
+                            ) || '|' ||
+                            regexp_replace(
+                                COALESCE(competition, ''),
+                                '_20[0-9]{2}$',
+                                ''
+                            ) || '|' ||
+                            COALESCE(event_year, '')
+
+                        WHEN event_type = 'range_contract'
+                        THEN
+                            'range_contract|' ||
+                            COALESCE(primary_entity, '') || '|' ||
+                            COALESCE(event_year, '')
+
+                        WHEN event_type = 'relative_deadline'
+                        THEN
+                            'relative_deadline|' ||
+                            COALESCE(primary_entity, '') || '|' ||
+                            COALESCE(secondary_entity, '') || '|' ||
+                            COALESCE(event_year, '')
+
+                        ELSE canonical_key
+                    END AS event_key,
+
+                    CASE
+                        WHEN event_type IN (
+                            'tournament_winner',
+                            'election_winner',
+                            'nomination_winner',
+                            'event_winner'
+                        )
+                        THEN
+                            event_type || '|' ||
+                            regexp_replace(
+                                COALESCE(competition, ''),
+                                '_20[0-9]{2}$',
+                                ''
+                            )
+
+                        WHEN event_type = 'head_to_head'
+                        THEN
+                            'head_to_head|' ||
+                            LEAST(
+                                COALESCE(primary_entity, ''),
+                                COALESCE(secondary_entity, '')
+                            ) || '|' ||
+                            GREATEST(
+                                COALESCE(primary_entity, ''),
+                                COALESCE(secondary_entity, '')
+                            ) || '|' ||
+                            regexp_replace(
+                                COALESCE(competition, ''),
+                                '_20[0-9]{2}$',
+                                ''
+                            )
+
+                        WHEN event_type = 'range_contract'
+                        THEN
+                            'range_contract|' ||
+                            COALESCE(primary_entity, '')
+
+                        WHEN event_type = 'relative_deadline'
+                        THEN
+                            'relative_deadline|' ||
+                            COALESCE(primary_entity, '') || '|' ||
+                            COALESCE(secondary_entity, '')
+
+                        ELSE canonical_key
+                    END AS event_core_key,
+
+                    CASE
+                        WHEN event_type IN (
+                            'tournament_winner',
+                            'election_winner',
+                            'nomination_winner',
+                            'event_winner'
+                        )
+                        THEN
+                            'winner|' || COALESCE(primary_entity, '')
+
+                        WHEN event_type = 'head_to_head'
+                        THEN
+                            COALESCE(target, '') || '|' ||
+                            CASE
+                                WHEN target = 'tie'
+                                THEN
+                                    LEAST(
+                                        COALESCE(primary_entity, ''),
+                                        COALESCE(secondary_entity, '')
+                                    ) || '|' ||
+                                    GREATEST(
+                                        COALESCE(primary_entity, ''),
+                                        COALESCE(secondary_entity, '')
+                                    )
+                                ELSE COALESCE(primary_entity, '')
+                            END
+
+                        WHEN event_type = 'range_contract'
+                        THEN
+                            'range|' ||
+                            COALESCE(comparison_operator, '') || '|' ||
+                            COALESCE(CAST(lower_threshold AS VARCHAR), '') || '|' ||
+                            COALESCE(CAST(upper_threshold AS VARCHAR), '')
+
+                        WHEN event_type = 'relative_deadline'
+                        THEN COALESCE(target, 'occurs_before')
+
+                        ELSE
+                            COALESCE(target, '') || '|' ||
+                            COALESCE(primary_entity, '')
+                    END AS contract_key,
+
+                    CASE
+                        WHEN competition IS NOT NULL
+                        THEN REPLACE(competition, '_', ' ')
+                        WHEN event_type = 'head_to_head'
+                        THEN
+                            REPLACE(COALESCE(primary_entity, ''), '_', ' ') ||
+                            ' vs ' ||
+                            REPLACE(COALESCE(secondary_entity, ''), '_', ' ')
+                        ELSE REPLACE(COALESCE(primary_entity, ''), '_', ' ')
+                    END AS event_label,
+
+                    CASE
+                        WHEN event_type IN (
+                            'tournament_winner',
+                            'election_winner',
+                            'nomination_winner',
+                            'event_winner'
+                        )
+                        THEN REPLACE(COALESCE(primary_entity, ''), '_', ' ')
+
+                        WHEN event_type = 'range_contract'
+                        THEN REPLACE(COALESCE(target, ''), '_', ' ')
+
+                        ELSE REPLACE(COALESCE(target, ''), '_', ' ')
+                    END AS contract_label
+                FROM market_semantics_live
+                WHERE is_matchable = TRUE
+                  AND canonical_key IS NOT NULL
+            ),
+            ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            platform,
+                            event_key,
+                            contract_key
+                        ORDER BY
+                            COALESCE(volume, 0) DESC,
+                            extraction_confidence DESC,
+                            snapshot_time DESC
+                    ) AS representative_rank
+                FROM enriched
+                WHERE event_key IS NOT NULL
+                  AND contract_key IS NOT NULL
+            )
             SELECT
                 platform,
-                COUNT(*) AS parsed,
-                COUNT(*) FILTER (WHERE is_matchable = TRUE) AS matchable,
-                COUNT(*) FILTER (WHERE exclusion_reason = 'multi_leg') AS excluded_multi_leg,
-                COUNT(*) FILTER (WHERE exclusion_reason = 'unsupported_structure') AS unsupported_structure,
-                COUNT(*) FILTER (WHERE exclusion_reason = 'insufficient_fields') AS insufficient_fields,
-                MAX(snapshot_time) AS latest_snapshot
-            FROM market_semantics_live
-            GROUP BY platform
+                market_id,
+                raw_title,
+                normalized_title,
+                event_type,
+                outcome_type,
+                primary_entity,
+                secondary_entity,
+                competition,
+                competition_base,
+                target,
+                comparison_operator,
+                lower_threshold,
+                upper_threshold,
+                event_year,
+                event_key,
+                event_core_key,
+                contract_key,
+                event_label,
+                contract_label,
+                extraction_confidence,
+                parse_notes,
+                source_url,
+                yes_price,
+                no_price,
+                volume,
+                liquidity,
+                status,
+                snapshot_time,
+                parser_version
+            FROM ranked
+            WHERE representative_rank = 1
             """
         )
+
+        connection.execute(
+            """
+            CREATE TABLE canonical_events AS
+            SELECT
+                event_key,
+                MIN(event_core_key) AS event_core_key,
+                MIN(event_type) AS event_type,
+                MIN(event_label) AS event_label,
+                MIN(competition) AS competition,
+                MIN(event_year) AS event_year,
+                COUNT(DISTINCT platform) AS platform_count,
+                COUNT(*) AS contract_count,
+                MAX(extraction_confidence) AS max_confidence,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM event_contracts
+            GROUP BY event_key
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE platform_events AS
+            SELECT
+                platform,
+                event_key,
+                MIN(event_core_key) AS event_core_key,
+                MIN(event_type) AS event_type,
+                MIN(event_label) AS event_label,
+                MIN(competition) AS competition,
+                MIN(event_year) AS event_year,
+                COUNT(*) AS contract_count,
+                MAX(volume) AS max_volume,
+                MAX(extraction_confidence) AS max_confidence,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM event_contracts
+            GROUP BY platform, event_key
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE matcher_diagnostics AS
+            WITH semantic_counts AS (
+                SELECT
+                    platform,
+                    COUNT(*) AS parsed,
+                    COUNT(*) FILTER (
+                        WHERE is_matchable = TRUE
+                    ) AS matchable,
+                    COUNT(*) FILTER (
+                        WHERE exclusion_reason = 'multi_leg'
+                    ) AS excluded_multi_leg,
+                    COUNT(*) FILTER (
+                        WHERE exclusion_reason = 'unsupported_structure'
+                    ) AS unsupported_structure,
+                    COUNT(*) FILTER (
+                        WHERE exclusion_reason = 'insufficient_fields'
+                    ) AS insufficient_fields,
+                    MAX(snapshot_time) AS latest_snapshot
+                FROM market_semantics_live
+                GROUP BY platform
+            ),
+            event_counts AS (
+                SELECT
+                    platform,
+                    COUNT(DISTINCT event_key) AS canonical_events,
+                    COUNT(*) AS event_contracts
+                FROM event_contracts
+                GROUP BY platform
+            )
+            SELECT
+                semantic_counts.*,
+                COALESCE(event_counts.canonical_events, 0)
+                    AS canonical_events,
+                COALESCE(event_counts.event_contracts, 0)
+                    AS event_contracts
+            FROM semantic_counts
+            LEFT JOIN event_counts USING (platform)
+            """
+        )
+
         connection.execute("CHECKPOINT")
 
         summary = connection.execute(

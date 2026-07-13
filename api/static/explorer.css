@@ -1394,3 +1394,11 @@ code {
 .coverage-card div strong { color: var(--text); }
 @media (max-width: 1050px) { .coverage-grid { grid-template-columns: repeat(2, minmax(170px, 1fr)); } }
 @media (max-width: 640px) { .coverage-grid { grid-template-columns: 1fr; } }
+
+
+.event-layer-note {
+    border: 1px solid rgba(45, 212, 191, 0.22);
+    background: rgba(13, 148, 136, 0.08);
+    border-radius: 16px;
+    padding: 16px;
+}
