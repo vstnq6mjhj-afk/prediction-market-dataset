@@ -1,19 +1,20 @@
-from pathlib import Path
+from __future__ import annotations
+
 import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
 
 import duckdb
 import pandas as pd
 
-
 ROOT = Path(__file__).resolve().parents[1]
-
 DB_PATH = Path(
     os.getenv(
         "DB_PATH",
         str(ROOT / "data" / "warehouse.duckdb"),
     )
 )
-
 
 COLUMNS = [
     "platform",
@@ -38,50 +39,73 @@ COLUMNS = [
 ]
 
 
-def initialize() -> None:
+def connect() -> duckdb.DuckDBPyConnection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(str(DB_PATH))
+    connection.execute("SET threads = 1")
+    return connection
 
-    conn = duckdb.connect(str(DB_PATH))
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS market_snapshots (
-            platform VARCHAR,
-            market_id VARCHAR,
-            title VARCHAR,
-            category VARCHAR,
-            start_date TIMESTAMP WITH TIME ZONE,
-            close_date VARCHAR,
-            resolution_date TIMESTAMP WITH TIME ZONE,
-            status VARCHAR,
-            outcome VARCHAR,
-            resolution_source VARCHAR,
-            raw_url VARCHAR,
-            volume DOUBLE,
-            liquidity DOUBLE,
-            yes_price DOUBLE,
-            no_price DOUBLE,
-            source VARCHAR,
-            ingested_at TIMESTAMP WITH TIME ZONE,
-            snapshot_time TIMESTAMP WITH TIME ZONE,
-            close_time VARCHAR
+def initialize() -> None:
+    connection = connect()
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                platform VARCHAR,
+                market_id VARCHAR,
+                title VARCHAR,
+                category VARCHAR,
+                start_date TIMESTAMP WITH TIME ZONE,
+                close_date VARCHAR,
+                resolution_date TIMESTAMP WITH TIME ZONE,
+                status VARCHAR,
+                outcome VARCHAR,
+                resolution_source VARCHAR,
+                raw_url VARCHAR,
+                volume DOUBLE,
+                liquidity DOUBLE,
+                yes_price DOUBLE,
+                no_price DOUBLE,
+                source VARCHAR,
+                ingested_at TIMESTAMP WITH TIME ZONE,
+                snapshot_time TIMESTAMP WITH TIME ZONE,
+                close_time VARCHAR
+            )
+            """
         )
-        """
-    )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_refresh_runs (
+                run_id VARCHAR PRIMARY KEY,
+                refresh_type VARCHAR,
+                started_at TIMESTAMP WITH TIME ZONE,
+                completed_at TIMESTAMP WITH TIME ZONE,
+                status VARCHAR,
+                snapshot_file VARCHAR,
+                snapshot_rows BIGINT,
+                total_rows BIGINT,
+                latest_snapshot TIMESTAMP WITH TIME ZONE,
+                error_message VARCHAR
+            )
+            """
+        )
+    finally:
+        connection.close()
 
-    conn.close()
 
+def _prepare_snapshot(
+    csv_path: str | Path,
+) -> pd.DataFrame:
+    frame = pd.read_csv(csv_path)
 
-def _prepare_snapshot(csv_path: str | Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+    for column in COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
 
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = None
+    frame = frame[COLUMNS].copy()
 
-    df = df[COLUMNS].copy()
-
-    for col in [
+    text_columns = [
         "platform",
         "market_id",
         "title",
@@ -93,78 +117,252 @@ def _prepare_snapshot(csv_path: str | Path) -> pd.DataFrame:
         "raw_url",
         "source",
         "close_time",
+    ]
+    for column in text_columns:
+        frame[column] = (
+            frame[column]
+            .astype("string")
+            .replace(
+                {
+                    "nan": None,
+                    "None": None,
+                    "unknown": None,
+                    "": None,
+                }
+            )
+        )
+
+    for column in [
+        "start_date",
+        "resolution_date",
+        "ingested_at",
+        "snapshot_time",
     ]:
-        df[col] = df[col].astype("string").replace(
-            {
-                "nan": None,
-                "None": None,
-                "unknown": None,
-                "": None,
-            }
+        frame[column] = pd.to_datetime(
+            frame[column],
+            errors="coerce",
+            utc=True,
         )
 
-    for col in ["start_date", "resolution_date", "ingested_at", "snapshot_time"]:
-        df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
-
-    for col in ["volume", "liquidity", "yes_price", "no_price"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
-def append_snapshot(csv_path: str | Path) -> None:
-    initialize()
-
-    df = _prepare_snapshot(csv_path)
-
-    conn = duckdb.connect(str(DB_PATH))
-    conn.register("snapshot_df", df)
-
-    conn.execute(
-        """
-        INSERT INTO market_snapshots (
-            platform,
-            market_id,
-            title,
-            category,
-            start_date,
-            close_date,
-            resolution_date,
-            status,
-            outcome,
-            resolution_source,
-            raw_url,
-            volume,
-            liquidity,
-            yes_price,
-            no_price,
-            source,
-            ingested_at,
-            snapshot_time,
-            close_time
+    for column in [
+        "volume",
+        "liquidity",
+        "yes_price",
+        "no_price",
+    ]:
+        frame[column] = pd.to_numeric(
+            frame[column],
+            errors="coerce",
         )
-        SELECT
-            platform,
-            market_id,
-            title,
-            category,
-            start_date,
-            close_date,
-            resolution_date,
-            status,
-            outcome,
-            resolution_source,
-            raw_url,
-            volume,
-            liquidity,
-            yes_price,
-            no_price,
-            source,
-            ingested_at,
-            snapshot_time,
-            close_time
-        FROM snapshot_df
-        """
+
+    frame = frame.dropna(
+        subset=["platform", "market_id", "snapshot_time"],
+    )
+    frame = frame.drop_duplicates(
+        subset=["platform", "market_id", "snapshot_time"],
+        keep="last",
     )
 
-    conn.close()
+    return frame
+
+
+def append_snapshot(
+    csv_path: str | Path,
+) -> dict[str, Any]:
+    initialize()
+    frame = _prepare_snapshot(csv_path)
+
+    if frame.empty:
+        raise ValueError(
+            "The prepared snapshot contains no appendable rows."
+        )
+
+    snapshot_times = list(
+        frame["snapshot_time"].dropna().unique()
+    )
+    if len(snapshot_times) != 1:
+        raise ValueError(
+            "A snapshot append must contain exactly one "
+            f"snapshot_time; found {len(snapshot_times)}."
+        )
+
+    snapshot_time = pd.Timestamp(
+        snapshot_times[0]
+    ).to_pydatetime()
+
+    connection = connect()
+    try:
+        connection.register("snapshot_df", frame)
+        connection.execute("BEGIN TRANSACTION")
+        connection.execute(
+            """
+            DELETE FROM market_snapshots
+            WHERE snapshot_time = ?
+            """,
+            [snapshot_time],
+        )
+        connection.execute(
+            """
+            INSERT INTO market_snapshots (
+                platform,
+                market_id,
+                title,
+                category,
+                start_date,
+                close_date,
+                resolution_date,
+                status,
+                outcome,
+                resolution_source,
+                raw_url,
+                volume,
+                liquidity,
+                yes_price,
+                no_price,
+                source,
+                ingested_at,
+                snapshot_time,
+                close_time
+            )
+            SELECT
+                platform,
+                market_id,
+                title,
+                category,
+                start_date,
+                close_date,
+                resolution_date,
+                status,
+                outcome,
+                resolution_source,
+                raw_url,
+                volume,
+                liquidity,
+                yes_price,
+                no_price,
+                source,
+                ingested_at,
+                snapshot_time,
+                close_time
+            FROM snapshot_df
+            """
+        )
+        connection.execute("COMMIT")
+        connection.execute("CHECKPOINT")
+
+        total_rows = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM market_snapshots"
+            ).fetchone()[0]
+        )
+        return {
+            "snapshot_rows": len(frame),
+            "total_rows": total_rows,
+            "snapshot_time": snapshot_time,
+        }
+    except Exception:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
+
+
+def start_refresh_run(
+    *,
+    run_id: str,
+    refresh_type: str,
+    started_at: datetime,
+) -> None:
+    initialize()
+    connection = connect()
+    try:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO dataset_refresh_runs (
+                run_id,
+                refresh_type,
+                started_at,
+                completed_at,
+                status,
+                snapshot_file,
+                snapshot_rows,
+                total_rows,
+                latest_snapshot,
+                error_message
+            )
+            VALUES (?, ?, ?, NULL, 'running', NULL, NULL, NULL, NULL, NULL)
+            """,
+            [run_id, refresh_type, started_at],
+        )
+    finally:
+        connection.close()
+
+
+def finish_refresh_run(
+    *,
+    run_id: str,
+    status: str,
+    completed_at: datetime,
+    snapshot_file: Optional[str],
+    snapshot_rows: Optional[int],
+    total_rows: Optional[int],
+    latest_snapshot: Any,
+    error_message: Optional[str],
+) -> None:
+    initialize()
+    connection = connect()
+    try:
+        connection.execute(
+            """
+            UPDATE dataset_refresh_runs
+            SET
+                completed_at = ?,
+                status = ?,
+                snapshot_file = ?,
+                snapshot_rows = ?,
+                total_rows = ?,
+                latest_snapshot = ?,
+                error_message = ?
+            WHERE run_id = ?
+            """,
+            [
+                completed_at,
+                status,
+                snapshot_file,
+                snapshot_rows,
+                total_rows,
+                latest_snapshot,
+                error_message,
+                run_id,
+            ],
+        )
+    finally:
+        connection.close()
+
+
+def warehouse_stats() -> dict[str, Any]:
+    initialize()
+    connection = connect()
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT snapshot_time) AS snapshots,
+                COUNT(DISTINCT platform || ':' || market_id)
+                    AS unique_markets,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM market_snapshots
+            """
+        ).fetchone()
+        return {
+            "total_rows": int(row[0] or 0),
+            "snapshots": int(row[1] or 0),
+            "unique_markets": int(row[2] or 0),
+            "latest_snapshot": row[3],
+        }
+    finally:
+        connection.close()
