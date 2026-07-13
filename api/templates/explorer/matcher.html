@@ -7,8 +7,8 @@
     <p class="eyebrow">Canonical cross-platform comparison</p>
     <h1>Market Matcher</h1>
     <p class="hero-copy">
-        Only markets with the same canonical semantic key are shown.
-        Titles are used for display and optional filtering, not as the final matching decision.
+        Verified and high-confidence semantic matches are shown.
+        Titles are used for display and optional filtering, never as the only matching decision.
     </p>
 </section>
 
@@ -66,6 +66,7 @@
         {% endfor %}
     </div>
 </section>
+{% endif %}
 
 <form class="filter-panel matcher-filter-panel semantic-filter-panel" method="get" action="/explorer/matcher">
     <label>
