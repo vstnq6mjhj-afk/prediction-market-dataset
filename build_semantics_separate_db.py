@@ -13,7 +13,13 @@ WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "event-contract-model-v7"
+PARSER_VERSION = "event-contract-model-v8-kalshi-normalized"
+KALSHI_NORMALIZED_PATH = Path(
+    os.getenv(
+        "KALSHI_NORMALIZED_DB_PATH",
+        "/var/data/kalshi_normalized.duckdb",
+    )
+)
 
 
 COUNTRY_ALIASES = {
@@ -182,6 +188,266 @@ def parse_kalshi_ticker_context(market_id: str) -> tuple[Optional[str], Optional
         return "mlb", None
     return None, None
 
+
+def parse_normalized_kalshi(
+    row: dict[str, Any],
+    year: Optional[str],
+) -> Optional[tuple[
+    str,
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[float],
+    Optional[float],
+    float,
+    bool,
+    str,
+]]:
+    """Parse event-level and contract-level Kalshi metadata conservatively."""
+    event_title = normalize_text(row.get("event_title"))
+    market_title = normalize_text(row.get("market_title") or row.get("title"))
+    yes_label = normalize_text(row.get("yes_sub_title"))
+    ticker = str(row.get("market_id") or "").upper()
+    strike_type = normalize_text(row.get("strike_type"))
+    floor = row.get("floor_strike")
+    cap = row.get("cap_strike")
+
+    combined = " ".join(part for part in (event_title, market_title) if part)
+
+    if row.get("is_multivariate"):
+        return (
+            "multi_leg_parlay",
+            None,
+            None,
+            None,
+            "all_legs",
+            None,
+            None,
+            None,
+            0.99,
+            False,
+            "Normalized Kalshi multivariate contract excluded.",
+        )
+
+    candidate = normalize_entity(yes_label)
+    if not candidate or candidate in {"yes", "no"}:
+        candidate_match = re.search(
+            r"will\s+(.+?)\s+(?:be|become|win|wins)\s+",
+            market_title,
+        )
+        if candidate_match:
+            candidate = normalize_entity(candidate_match.group(1))
+
+    # Presidential nomination contracts.
+    if (
+        "presidential nominee" in combined
+        or "presidential nomination" in combined
+        or "PRESNOM" in ticker
+    ):
+        party = None
+        if "democratic" in combined or "PRESNOMD" in ticker:
+            party = "democratic nomination"
+        elif "republican" in combined or "PRESNOMR" in ticker:
+            party = "republican nomination"
+
+        if candidate and party:
+            return (
+                "nomination_winner",
+                candidate,
+                None,
+                normalize_competition(party, year),
+                "winner",
+                None,
+                None,
+                None,
+                0.97,
+                True,
+                "Normalized Kalshi presidential nomination contract parsed.",
+            )
+
+    # Presidential election winner.
+    if (
+        "presidential election" in combined
+        or "elected president" in combined
+        or "PRESIDENT" in ticker
+    ):
+        if candidate:
+            return (
+                "election_winner",
+                candidate,
+                None,
+                normalize_competition("presidential election", year),
+                "winner",
+                None,
+                None,
+                None,
+                0.96,
+                True,
+                "Normalized Kalshi presidential election contract parsed.",
+            )
+
+    # Governor winner contracts.
+    if "governor" in combined or "governorship" in combined or "KXGOV" in ticker:
+        state_match = re.search(
+            r"(?:governor|governorship)\s+(?:in|of)\s+([a-z ]+)",
+            combined,
+        )
+        state = normalize_entity(state_match.group(1)) if state_match else None
+
+        if candidate:
+            competition_name = (
+                f"{state.replace('_', ' ')} governor election"
+                if state
+                else "governor election"
+            )
+            return (
+                "election_winner",
+                candidate,
+                None,
+                normalize_competition(competition_name, year),
+                "winner",
+                None,
+                None,
+                None,
+                0.93,
+                True,
+                "Normalized Kalshi governor winner contract parsed.",
+            )
+
+    # Party control contracts.
+    if (
+        "win the house" in market_title
+        or "control the house" in combined
+        or "CONTROLH" in ticker
+    ):
+        if candidate:
+            return (
+                "election_winner",
+                candidate,
+                None,
+                normalize_competition("us house election", year),
+                "winner",
+                None,
+                None,
+                None,
+                0.94,
+                True,
+                "Normalized Kalshi House-control contract parsed.",
+            )
+
+    if (
+        "win the senate" in market_title
+        or "control the senate" in combined
+        or "CONTROLS" in ticker
+    ):
+        if candidate:
+            return (
+                "election_winner",
+                candidate,
+                None,
+                normalize_competition("us senate election", year),
+                "winner",
+                None,
+                None,
+                None,
+                0.94,
+                True,
+                "Normalized Kalshi Senate-control contract parsed.",
+            )
+
+    # Tournament or championship winner.
+    if any(
+        phrase in combined
+        for phrase in (
+            "world cup",
+            "championship",
+            "tournament winner",
+            "league winner",
+        )
+    ):
+        winner_match = re.search(
+            r"will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)(?:\?|$)",
+            market_title,
+        )
+        if winner_match:
+            entity = normalize_entity(winner_match.group(1))
+            competition_text = winner_match.group(2)
+            if entity:
+                return (
+                    "tournament_winner",
+                    entity,
+                    None,
+                    normalize_competition(competition_text, year),
+                    "winner",
+                    None,
+                    None,
+                    None,
+                    0.94,
+                    True,
+                    "Normalized Kalshi tournament-winner contract parsed.",
+                )
+
+    # Numeric threshold contracts.
+    if strike_type in {"greater", "greater_than", "above"} and floor is not None:
+        subject = slug(event_title or market_title)
+        if subject:
+            return (
+                "threshold_contract",
+                subject,
+                None,
+                None,
+                "above",
+                "gte",
+                float(floor),
+                None,
+                0.93,
+                True,
+                "Normalized Kalshi above-threshold contract parsed.",
+            )
+
+    if strike_type in {"less", "less_than", "below"} and cap is not None:
+        subject = slug(event_title or market_title)
+        if subject:
+            return (
+                "threshold_contract",
+                subject,
+                None,
+                None,
+                "below",
+                "lte",
+                None,
+                float(cap),
+                0.93,
+                True,
+                "Normalized Kalshi below-threshold contract parsed.",
+            )
+
+    # Before-date event occurrence.
+    if "before " in market_title:
+        before_match = re.search(r"(.+?)\s+before\s+(.+?)(?:\?|$)", market_title)
+        if before_match:
+            subject = slug(before_match.group(1))
+            deadline = slug(before_match.group(2))
+            if subject and deadline:
+                return (
+                    "relative_deadline",
+                    subject,
+                    deadline,
+                    None,
+                    "occurs_before",
+                    None,
+                    None,
+                    None,
+                    0.90,
+                    True,
+                    "Normalized Kalshi deadline contract parsed.",
+                )
+
+    return None
+
+
 def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     platform = normalize_text(row["platform"])
     market_id = str(row["market_id"])
@@ -208,6 +474,23 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     matchable = False
     notes = "No reliable deterministic semantic pattern found."
 
+    if platform == "kalshi" and row.get("normalized_kalshi"):
+        parsed_kalshi = parse_normalized_kalshi(row, year)
+        if parsed_kalshi is not None:
+            (
+                event_type,
+                primary,
+                secondary,
+                competition,
+                target,
+                operator,
+                lower,
+                upper,
+                confidence,
+                matchable,
+                notes,
+            ) = parsed_kalshi
+
     raw_title_lower = raw_title.lower()
     kalshi_leg_markers = re.findall(
         r"(?:^|,)\s*(?:yes|no)\s+",
@@ -227,7 +510,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
     # Kalshi multi-leg products must never be treated as a single-market equivalent.
-    if kalshi_multi_leg:
+    if event_type == "unknown" and kalshi_multi_leg:
         event_type = "multi_leg_parlay"
         outcome_type = "multi_leg"
         target = "all_legs"
@@ -236,7 +519,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
 
     # A single prefixed Kalshi contract still lacks enough event context in the
     # current warehouse schema to match safely.
-    elif kalshi_prefixed_contract:
+    elif event_type == "unknown" and kalshi_prefixed_contract:
         event_type = "kalshi_contract_leg"
         outcome_type = "contract_leg"
         confidence = 0.99
@@ -244,7 +527,7 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
 
     # Kalshi single-market titles without YES/NO bundle prefixes are parsed
     # with ticker family hints only as support.
-    elif platform == "kalshi":
+    elif event_type == "unknown" and platform == "kalshi":
         family_hint, _ = parse_kalshi_ticker_context(market_id)
 
         kalshi_winner = re.search(
@@ -553,6 +836,7 @@ def main() -> None:
                        ROW_NUMBER() OVER(PARTITION BY platform,market_id ORDER BY snapshot_time DESC) market_rank
                 FROM warehouse.market_snapshots
                 WHERE market_id IS NOT NULL
+                  AND LOWER(platform) <> 'kalshi'
             ), capped AS (
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY platform ORDER BY COALESCE(volume,0) DESC,snapshot_time DESC) platform_rank
                 FROM latest_unique WHERE market_rank=1
@@ -585,6 +869,95 @@ def main() -> None:
 
         columns = [item[0] for item in cursor.description]
         records = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        if KALSHI_NORMALIZED_PATH.exists():
+            connection.execute(
+                f"ATTACH '{KALSHI_NORMALIZED_PATH.as_posix()}' "
+                "AS kalshi_normalized (READ_ONLY)"
+            )
+
+            kalshi_cursor = connection.execute(
+                """
+                SELECT
+                    'kalshi' AS platform,
+                    market_ticker AS market_id,
+                    market_title AS title,
+                    NULL AS category,
+                    occurrence_datetime AS start_date,
+                    close_time AS close_date,
+                    expiration_time AS resolution_date,
+                    close_time,
+                    NULL AS raw_url,
+                    COALESCE(
+                        last_price,
+                        CASE
+                            WHEN yes_bid IS NOT NULL
+                             AND yes_ask IS NOT NULL
+                            THEN (yes_bid + yes_ask) / 2
+                            ELSE COALESCE(yes_bid, yes_ask)
+                        END
+                    ) AS yes_price,
+                    CASE
+                        WHEN COALESCE(
+                            last_price,
+                            CASE
+                                WHEN yes_bid IS NOT NULL
+                                 AND yes_ask IS NOT NULL
+                                THEN (yes_bid + yes_ask) / 2
+                                ELSE COALESCE(yes_bid, yes_ask)
+                            END
+                        ) IS NOT NULL
+                        THEN 1 - COALESCE(
+                            last_price,
+                            CASE
+                                WHEN yes_bid IS NOT NULL
+                                 AND yes_ask IS NOT NULL
+                                THEN (yes_bid + yes_ask) / 2
+                                ELSE COALESCE(yes_bid, yes_ask)
+                            END
+                        )
+                        ELSE NULL
+                    END AS no_price,
+                    volume,
+                    liquidity,
+                    status,
+                    collected_at AS snapshot_time,
+                    event_title,
+                    market_title,
+                    market_subtitle,
+                    yes_sub_title,
+                    no_sub_title,
+                    strike_type,
+                    floor_strike,
+                    cap_strike,
+                    event_ticker,
+                    series_ticker,
+                    is_multivariate,
+                    TRUE AS normalized_kalshi
+                FROM kalshi_normalized.kalshi_contracts
+                WHERE market_ticker IS NOT NULL
+                  AND COALESCE(status, 'open') NOT IN (
+                      'closed',
+                      'settled',
+                      'finalized'
+                  )
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY market_ticker
+                    ORDER BY collected_at DESC
+                ) = 1
+                ORDER BY COALESCE(volume, 0) DESC, collected_at DESC
+                LIMIT 10000
+                """
+            )
+
+            kalshi_columns = [
+                item[0] for item in kalshi_cursor.description
+            ]
+            records.extend(
+                dict(zip(kalshi_columns, row))
+                for row in kalshi_cursor.fetchall()
+            )
+
         parsed = [infer(record) for record in records]
 
         connection.execute(CREATE_SQL)
@@ -650,6 +1023,12 @@ def main() -> None:
                             COALESCE(secondary_entity, '') || '|' ||
                             COALESCE(event_year, '')
 
+                        WHEN event_type = 'threshold_contract'
+                        THEN
+                            'threshold_contract|' ||
+                            COALESCE(primary_entity, '') || '|' ||
+                            COALESCE(event_year, '')
+
                         ELSE canonical_key
                     END AS event_key,
 
@@ -696,6 +1075,11 @@ def main() -> None:
                             COALESCE(primary_entity, '') || '|' ||
                             COALESCE(secondary_entity, '')
 
+                        WHEN event_type = 'threshold_contract'
+                        THEN
+                            'threshold_contract|' ||
+                            COALESCE(primary_entity, '')
+
                         ELSE canonical_key
                     END AS event_core_key,
 
@@ -735,6 +1119,13 @@ def main() -> None:
 
                         WHEN event_type = 'relative_deadline'
                         THEN COALESCE(target, 'occurs_before')
+
+                        WHEN event_type = 'threshold_contract'
+                        THEN
+                            COALESCE(target, '') || '|' ||
+                            COALESCE(comparison_operator, '') || '|' ||
+                            COALESCE(CAST(lower_threshold AS VARCHAR), '') || '|' ||
+                            COALESCE(CAST(upper_threshold AS VARCHAR), '')
 
                         ELSE
                             COALESCE(target, '') || '|' ||
