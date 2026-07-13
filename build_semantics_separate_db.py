@@ -529,13 +529,25 @@ def main() -> None:
                 SELECT platform,market_id,title,category,start_date,close_date,resolution_date,close_time,raw_url,yes_price,no_price,volume,liquidity,status,snapshot_time,
                        ROW_NUMBER() OVER(PARTITION BY platform,market_id ORDER BY snapshot_time DESC) market_rank
                 FROM warehouse.market_snapshots
-                WHERE market_id IS NOT NULL AND LOWER(COALESCE(status,'active')) NOT IN ('closed','resolved','settled','cancelled','canceled')
+                WHERE market_id IS NOT NULL
+                AND NOT (
+                    LOWER(platform) = 'kalshi'
+                    AND (
+                        LOWER(market_id) LIKE '%multigame%'
+                        OR LOWER(COALESCE(title, '')) LIKE 'yes %,%'
+                        OR LOWER(COALESCE(title, '')) LIKE '%,yes %'
+                    )
+                )
             ), capped AS (
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY platform ORDER BY COALESCE(volume,0) DESC,snapshot_time DESC) platform_rank
                 FROM latest_unique WHERE market_rank=1
             )
             SELECT platform,market_id,title,category,start_date,close_date,resolution_date,close_time,raw_url,yes_price,no_price,volume,liquidity,status,snapshot_time
-            FROM capped WHERE platform_rank<=2000 ORDER BY platform,platform_rank
+            WHERE platform_rank <=
+            CASE
+                WHEN LOWER(platform) = 'kalshi' THEN 5000
+                ELSE 2000
+            END
             """
         )
 
