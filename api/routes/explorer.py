@@ -788,12 +788,13 @@ def _connect_semantics() -> duckdb.DuckDBPyConnection:
 def _semantic_platforms(
     connection: duckdb.DuckDBPyConnection,
 ) -> List[str]:
+    # Show every platform represented in the latest semantic build.
+    # A platform remains selectable even when its current matchable count is zero.
     rows = connection.execute(
         """
         SELECT DISTINCT platform
         FROM market_semantics_live
-        WHERE is_matchable = TRUE
-          AND platform IS NOT NULL
+        WHERE platform IS NOT NULL
         ORDER BY platform
         """
     ).fetchall()

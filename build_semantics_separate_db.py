@@ -8,22 +8,109 @@ from typing import Any, Optional
 
 import duckdb
 
+
 WAREHOUSE_PATH = Path(os.getenv("DB_PATH", "/var/data/warehouse.duckdb"))
 SEMANTICS_PATH = Path(
     os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
 )
-PARSER_VERSION = "semantic-live-separate-db-v2"
+PARSER_VERSION = "semantic-live-separate-db-v3"
+
+
+COUNTRY_ALIASES = {
+    "usa": "united_states",
+    "u s": "united_states",
+    "us": "united_states",
+    "united states of america": "united_states",
+    "united states": "united_states",
+    "uk": "united_kingdom",
+    "u k": "united_kingdom",
+    "great britain": "united_kingdom",
+    "britain": "united_kingdom",
+    "south korea": "south_korea",
+    "republic of korea": "south_korea",
+    "north korea": "north_korea",
+    "czech republic": "czechia",
+    "uae": "united_arab_emirates",
+}
+
+ENTITY_PREFIXES = (
+    "team ",
+    "the team ",
+    "national team ",
+    "the national team ",
+)
 
 
 def normalize_text(value: Any) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     text = text.encode("ascii", "ignore").decode("ascii").lower()
-    text = re.sub(r"[^a-z0-9%$.\s|:-]", " ", text)
+    text = re.sub(r"[^a-z0-9%$.\s|:'-]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def slug(value: Any) -> str:
-    return "_".join(re.findall(r"[a-z0-9]+", normalize_text(value))[:20])
+    return "_".join(re.findall(r"[a-z0-9]+", normalize_text(value))[:24])
+
+
+def extract_year(*values: Any) -> Optional[str]:
+    for value in values:
+        text = normalize_text(value)
+        match = re.search(r"\b(20\d{2})\b", text)
+        if match:
+            return match.group(1)
+
+        year = getattr(value, "year", None)
+        if year:
+            return str(year)
+
+    return None
+
+
+def normalize_entity(value: Any) -> Optional[str]:
+    text = normalize_text(value)
+    if not text:
+        return None
+
+    for prefix in ENTITY_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+
+    text = re.sub(r"\b(?:mens|women s|womens)\s+national\s+team\b", "", text)
+    text = re.sub(r"\bnational\s+team\b", "", text)
+    text = re.sub(r"\bteam\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+
+    return COUNTRY_ALIASES.get(text, slug(text)) or None
+
+
+def normalize_competition(value: Any, year: Optional[str]) -> Optional[str]:
+    text = normalize_text(value)
+    if not text:
+        return None
+
+    if "world cup" in text:
+        base = "fifa_world_cup"
+    elif "champions league" in text:
+        base = "uefa_champions_league"
+    elif "europa league" in text:
+        base = "uefa_europa_league"
+    elif "premier league" in text:
+        base = "english_premier_league"
+    elif "presidential election" in text:
+        base = "presidential_election"
+    elif "midterm election" in text:
+        base = "midterm_election"
+    elif "democratic nomination" in text:
+        base = "democratic_nomination"
+    elif "republican nomination" in text:
+        base = "republican_nomination"
+    else:
+        base = slug(text)
+
+    if year and year not in base:
+        return f"{base}_{year}"
+    return base or None
 
 
 def parse_range_contract(text: str):
@@ -52,6 +139,13 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     market_id = str(row["market_id"])
     raw_title = str(row.get("title") or "").strip()
     title = normalize_text(raw_title)
+    year = extract_year(
+        raw_title,
+        row.get("start_date"),
+        row.get("resolution_date"),
+        row.get("close_date"),
+        row.get("close_time"),
+    )
 
     event_type = "unknown"
     outcome_type = "binary"
@@ -64,8 +158,9 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
     upper: Optional[float] = None
     confidence = 0.20
     matchable = False
-    notes = "No reliable semantic pattern found."
+    notes = "No reliable deterministic semantic pattern found."
 
+    # Kalshi multi-leg products must never be treated as a single-market equivalent.
     if platform == "kalshi" and (
         "multigame" in market_id.lower()
         or title.startswith("yes ")
@@ -75,70 +170,95 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         outcome_type = "multi_leg"
         target = "all_legs_yes"
         confidence = 0.99
-        notes = "Multi-leg market excluded from automatic matching."
+        notes = "Kalshi multi-leg market excluded from automatic matching."
 
+    # PredictIt parent question and contract are separated by a pipe.
     elif platform == "predictit" and "|" in raw_title:
         parent, contract = [part.strip() for part in raw_title.split("|", 1)]
         operator, lower, upper = parse_range_contract(contract)
-        primary = normalize_text(parent)
-        target = normalize_text(contract)
+        primary = slug(parent)
+        target = slug(contract)
 
         if operator:
             event_type = "range_contract"
             outcome_type = "range"
             confidence = 0.96
             matchable = True
-            notes = "PredictIt range contract parsed."
+            notes = "PredictIt numeric range contract parsed."
         else:
             event_type = "contract_outcome"
             confidence = 0.75
             notes = "PredictIt contract parsed but requires review."
 
     else:
-        match = re.search(
-            r"will\s+(.+?)\s+(?:beat|defeat)\s+(.+?)"
-            r"(?:\s+in\b|\s+during\b|\?|$)",
-            title,
-        )
-        if match:
-            event_type = "head_to_head"
-            primary = match.group(1).strip()
-            secondary = match.group(2).strip()
-            target = "match_winner"
-            confidence = 0.91
-            matchable = True
-            notes = "Head-to-head market parsed."
+        # Head-to-head winner:
+        # "Will Spain beat France in the World Cup semifinal?"
+        # "Spain to beat France in the World Cup semifinal"
+        head_to_head_patterns = [
+            r"will\s+(.+?)\s+(?:beat|defeat)\s+(.+?)(?:\s+in\s+(.+?))?(?:\?|$)",
+            r"(.+?)\s+to\s+(?:beat|defeat)\s+(.+?)(?:\s+in\s+(.+?))?(?:\?|$)",
+        ]
 
+        for pattern in head_to_head_patterns:
+            match = re.search(pattern, title)
+            if match:
+                event_type = "head_to_head"
+                primary = normalize_entity(match.group(1))
+                secondary = normalize_entity(match.group(2))
+                competition = normalize_competition(match.group(3), year)
+                target = "match_winner"
+                confidence = 0.93
+                matchable = bool(primary and secondary)
+                notes = "Directional head-to-head market parsed."
+                break
+
+        # Tie/draw market.
         if event_type == "unknown":
             match = re.search(
-                r"will\s+(.+?)\s+and\s+(.+?)\s+be\s+tied",
+                r"will\s+(.+?)\s+and\s+(.+?)\s+be\s+(?:tied|a draw)",
                 title,
             )
             if match:
                 event_type = "head_to_head"
-                primary = match.group(1).strip()
-                secondary = match.group(2).strip()
-                target = "tie"
-                confidence = 0.92
-                matchable = True
-                notes = "Head-to-head tie market parsed."
+                pair = sorted(
+                    filter(
+                        None,
+                        [
+                            normalize_entity(match.group(1)),
+                            normalize_entity(match.group(2)),
+                        ],
+                    )
+                )
+                if len(pair) == 2:
+                    primary, secondary = pair
+                    target = "tie"
+                    confidence = 0.94
+                    matchable = True
+                    notes = "Symmetric tie market parsed."
 
+        # Event, tournament, election, or nomination winner.
         if event_type == "unknown":
-            match = re.search(
-                r"will\s+(.+?)\s+win\s+(?:the\s+)?"
-                r"(?:20\d{2}\s+)?(.+?)(?:\?|$)",
-                title,
-            )
-            if match:
-                primary = match.group(1).strip()
-                competition = match.group(2).strip()
+            winner_patterns = [
+                r"will\s+(.+?)\s+win\s+(?:the\s+)?(?:20\d{2}\s+)?(.+?)(?:\?|$)",
+                r"(.+?)\s+to\s+win\s+(?:the\s+)?(?:20\d{2}\s+)?(.+?)(?:\?|$)",
+                r"(.+?)\s+wins\s+(?:the\s+)?(?:20\d{2}\s+)?(.+?)(?:\?|$)",
+            ]
 
-                if "nomination" in competition:
+            for pattern in winner_patterns:
+                match = re.search(pattern, title)
+                if not match:
+                    continue
+
+                primary = normalize_entity(match.group(1))
+                competition_text = match.group(2).strip()
+                competition = normalize_competition(competition_text, year)
+
+                if "nomination" in competition_text:
                     event_type = "nomination_winner"
-                elif "election" in competition:
+                elif "election" in competition_text:
                     event_type = "election_winner"
                 elif any(
-                    term in competition
+                    term in competition_text
                     for term in (
                         "world cup",
                         "championship",
@@ -151,22 +271,22 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
                     event_type = "event_winner"
 
                 target = "winner"
-                confidence = 0.88
-                matchable = True
-                notes = "Winner market parsed."
+                confidence = 0.91
+                matchable = bool(primary and competition)
+                notes = "Winner market parsed and aliases normalized."
+                break
 
+        # Relative deadline:
+        # "New Rihanna album before GTA VI?"
         if event_type == "unknown":
-            match = re.search(
-                r"(.+?)\s+before\s+(.+?)(?:\?|$)",
-                title,
-            )
+            match = re.search(r"(.+?)\s+before\s+(.+?)(?:\?|$)", title)
             if match:
                 event_type = "relative_deadline"
-                primary = match.group(1).strip()
-                secondary = match.group(2).strip()
+                primary = slug(match.group(1))
+                secondary = slug(match.group(2))
                 target = "occurs_before"
-                confidence = 0.86
-                matchable = True
+                confidence = 0.88
+                matchable = bool(primary and secondary)
                 notes = "Relative deadline market parsed."
 
     canonical_key = None
@@ -174,10 +294,11 @@ def infer(row: dict[str, Any]) -> tuple[Any, ...]:
         canonical_key = "|".join(
             [
                 event_type,
-                slug(primary),
-                slug(secondary),
-                slug(competition),
-                slug(target),
+                primary or "",
+                secondary or "",
+                competition or "",
+                target or "",
+                year or "",
                 "" if lower is None else str(lower),
                 "" if upper is None else str(upper),
             ]
@@ -244,6 +365,7 @@ CREATE TABLE market_semantics_live (
 )
 """
 
+
 INSERT_SQL = """
 INSERT INTO market_semantics_live (
     platform,
@@ -297,28 +419,39 @@ def main() -> None:
     )
 
     try:
-        latest_snapshot = connection.execute(
-            "SELECT MAX(snapshot_time) FROM warehouse.market_snapshots"
-        ).fetchone()[0]
-
         cursor = connection.execute(
             """
+            WITH latest_per_platform AS (
+                SELECT
+                    platform,
+                    MAX(snapshot_time) AS latest_snapshot
+                FROM warehouse.market_snapshots
+                WHERE platform IS NOT NULL
+                GROUP BY platform
+            )
             SELECT
-                platform,
-                market_id,
-                title,
-                raw_url,
-                yes_price,
-                no_price,
-                volume,
-                liquidity,
-                status,
-                snapshot_time
-            FROM warehouse.market_snapshots
-            WHERE snapshot_time = ?
-              AND market_id IS NOT NULL
-            """,
-            [latest_snapshot],
+                market.platform,
+                market.market_id,
+                market.title,
+                market.category,
+                market.start_date,
+                market.close_date,
+                market.resolution_date,
+                market.close_time,
+                market.raw_url,
+                market.yes_price,
+                market.no_price,
+                market.volume,
+                market.liquidity,
+                market.status,
+                market.snapshot_time
+            FROM warehouse.market_snapshots AS market
+            INNER JOIN latest_per_platform AS latest
+              ON market.platform = latest.platform
+             AND market.snapshot_time = latest.latest_snapshot
+            WHERE market.market_id IS NOT NULL
+            ORDER BY market.platform, market.market_id
+            """
         )
 
         columns = [item[0] for item in cursor.description]
@@ -331,6 +464,19 @@ def main() -> None:
 
         connection.execute("CHECKPOINT")
 
+        summary = connection.execute(
+            """
+            SELECT
+                platform,
+                COUNT(*) AS parsed,
+                COUNT(*) FILTER (WHERE is_matchable = TRUE) AS matchable,
+                MAX(snapshot_time) AS latest_snapshot
+            FROM market_semantics_live
+            GROUP BY platform
+            ORDER BY platform
+            """
+        ).fetchall()
+
         total, matchable = connection.execute(
             """
             SELECT
@@ -342,9 +488,16 @@ def main() -> None:
 
         print(f"[semantics-db] Warehouse: {WAREHOUSE_PATH}")
         print(f"[semantics-db] Temporary output: {temporary_path}")
-        print(f"[semantics-db] Latest snapshot: {latest_snapshot}")
         print(f"[semantics-db] Parsed markets: {total:,}")
         print(f"[semantics-db] Matchable markets: {matchable:,}")
+
+        for platform, parsed_count, matchable_count, latest_snapshot in summary:
+            print(
+                f"[semantics-db] {platform}: "
+                f"parsed={parsed_count:,}, "
+                f"matchable={matchable_count:,}, "
+                f"latest={latest_snapshot}"
+            )
     finally:
         connection.close()
 
