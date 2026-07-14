@@ -62,10 +62,15 @@ def main() -> int:
             f"Polymarket connector error: "
             f"{polymarket['error']}"
         )
-    if polymarket_page.get("endpoint") != "/events":
+    if polymarket_page.get("endpoint") != "/events/keyset":
         failures.append(
-            "Polymarket discovery did not use the event-first "
-            "/events strategy."
+            "Polymarket discovery did not use the "
+            "/events/keyset endpoint."
+        )
+    if polymarket_page.get("partial_error"):
+        failures.append(
+            "Polymarket keyset pagination stopped after a "
+            f"request error: {polymarket_page.get('partial_error')}."
         )
     if int(polymarket.get("returned_rows") or 0) <= 100:
         failures.append(
@@ -112,7 +117,9 @@ def main() -> int:
             print("FAIL:", failure)
         return 1
 
-    print("PASS: Kalshi and Polymarket discovery completed.")
+    print(
+        "PASS: Kalshi and Polymarket keyset discovery completed."
+    )
     return 0
 
 

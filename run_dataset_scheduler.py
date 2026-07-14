@@ -406,6 +406,14 @@ def run_discovery_cycle() -> bool:
             },
         )
 
+        run_command(
+            [
+                sys.executable,
+                "validate_discovery_coverage.py",
+            ],
+            label="discovery coverage validation",
+        )
+
         snapshot_path = latest_snapshot_file(
             DISCOVERY_SNAPSHOT_DIR
         )

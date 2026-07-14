@@ -298,8 +298,9 @@ def _fetch_discovery(
     now: str,
 ) -> list[dict[str, Any]]:
     session = build_session()
-    url = f"{POLYMARKET_BASE_URL}/events"
-    offset = 0
+    url = f"{POLYMARKET_BASE_URL}/events/keyset"
+    after_cursor = ""
+    seen_cursors: set[str] = set()
     rows_by_id: dict[str, dict[str, Any]] = {}
 
     pages_fetched = 0
@@ -309,23 +310,45 @@ def _fetch_discovery(
     last_page_size = 0
     termination_reason = "not_started"
     complete = False
+    partial_error: Optional[str] = None
 
     for page_number in range(1, maximum_pages + 1):
-        payload = get_json(
-            session,
-            url,
-            params={
-                "active": "true",
-                "closed": "false",
-                "limit": page_size,
-                "offset": offset,
-            },
-        )
-        events = payload if isinstance(payload, list) else []
-        if not isinstance(events, list):
-            raise RuntimeError(
-                "Polymarket events response was not a list."
+        params: dict[str, Any] = {
+            "live": "true",
+            "closed": "false",
+            "limit": page_size,
+        }
+        if after_cursor:
+            params["after_cursor"] = after_cursor
+
+        try:
+            payload = get_json(
+                session,
+                url,
+                params=params,
             )
+        except Exception as exc:
+            partial_error = str(exc)
+            termination_reason = "request_failed"
+            break
+
+        if not isinstance(payload, dict):
+            partial_error = (
+                "Polymarket keyset response was not an object."
+            )
+            termination_reason = "invalid_response"
+            break
+
+        events = payload.get("events") or []
+        if not isinstance(events, list):
+            partial_error = (
+                "Polymarket keyset response field 'events' "
+                "was not a list."
+            )
+            termination_reason = "invalid_response"
+            break
+
+        next_cursor = str(payload.get("next_cursor") or "")
 
         pages_fetched += 1
         last_page_size = len(events)
@@ -363,9 +386,10 @@ def _fetch_discovery(
 
         print(
             f"[polymarket:discovery] page={page_number} "
-            f"offset={offset:,} events={len(events):,} "
+            f"events={len(events):,} "
             f"nested_markets={page_market_count:,} "
-            f"unique={len(rows_by_id):,}",
+            f"unique={len(rows_by_id):,} "
+            f"next_cursor={'yes' if next_cursor else 'no'}",
             flush=True,
         )
 
@@ -378,12 +402,17 @@ def _fetch_discovery(
             complete = True
             break
 
-        if len(events) < page_size:
-            termination_reason = "final_short_page"
+        if not next_cursor:
+            termination_reason = "cursor_exhausted"
             complete = True
             break
 
-        offset += page_size
+        if next_cursor in seen_cursors:
+            termination_reason = "repeated_cursor"
+            break
+
+        seen_cursors.add(next_cursor)
+        after_cursor = next_cursor
 
         if REQUEST_SLEEP_SECONDS:
             time.sleep(REQUEST_SLEEP_SECONDS)
@@ -395,8 +424,8 @@ def _fetch_discovery(
         rows = rows[:maximum_rows]
 
     _set_diagnostics(
-        endpoint="/events",
-        strategy="event_first_nested_markets",
+        endpoint="/events/keyset",
+        strategy="keyset_event_first_nested_markets",
         mode="discovery",
         pages_fetched=pages_fetched,
         page_size=page_size,
@@ -412,6 +441,7 @@ def _fetch_discovery(
         page_limit_reached=(
             termination_reason == "page_limit_reached"
         ),
+        partial_error=partial_error,
     )
     return rows
 

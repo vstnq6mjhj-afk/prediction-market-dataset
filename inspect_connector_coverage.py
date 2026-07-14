@@ -60,6 +60,14 @@ def _display_connector(
             "  excluded_multivariate:",
             pagination.get("excluded_multivariate"),
         )
+        print(
+            "  strategy:",
+            pagination.get("strategy"),
+        )
+        print(
+            "  partial_error:",
+            pagination.get("partial_error"),
+        )
 
 
 def main() -> None:
