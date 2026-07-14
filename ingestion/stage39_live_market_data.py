@@ -18,6 +18,10 @@ SNAPSHOT_DIR = Path(
         str(ROOT / "data" / "snapshots"),
     )
 )
+REFRESH_MODE = os.getenv(
+    "MARKET_REFRESH_MODE",
+    "fast",
+).strip().lower()
 
 EXPECTED_COLUMNS = [
     "platform",
@@ -54,10 +58,19 @@ def write_csv_atomically(
 
 
 def main() -> None:
-    print("Stage 39 live market data started.", flush=True)
+    if REFRESH_MODE not in {"fast", "discovery"}:
+        raise ValueError(
+            "MARKET_REFRESH_MODE must be 'fast' or 'discovery'."
+        )
+
+    print(
+        f"Stage 39 live market data started "
+        f"(mode={REFRESH_MODE}).",
+        flush=True,
+    )
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-    rows = aggregate_markets()
+    rows = aggregate_markets(mode=REFRESH_MODE)
     if not rows:
         raise ValueError(
             "No live markets returned from the aggregator."
@@ -91,11 +104,21 @@ def main() -> None:
     timestamp = datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H-%M-%SZ"
     )
-    output_path = SNAPSHOT_DIR / f"markets_{timestamp}.csv"
-    latest_path = SNAPSHOT_DIR / "latest.csv"
+    output_path = (
+        SNAPSHOT_DIR
+        / f"markets_{REFRESH_MODE}_{timestamp}.csv"
+    )
+    latest_path = SNAPSHOT_DIR / f"latest_{REFRESH_MODE}.csv"
 
     write_csv_atomically(frame, output_path)
     write_csv_atomically(frame, latest_path)
+
+    platform_counts = (
+        frame.groupby("platform")["market_id"]
+        .nunique()
+        .sort_index()
+        .to_dict()
+    )
 
     print(
         f"{datetime.now(timezone.utc).isoformat()} | "
@@ -105,6 +128,10 @@ def main() -> None:
     )
     print(
         f"[{len(frame):,} rows x {len(frame.columns)} columns]",
+        flush=True,
+    )
+    print(
+        f"Platform counts: {platform_counts}",
         flush=True,
     )
     print(

@@ -1,71 +1,231 @@
-import requests
+from __future__ import annotations
+
+import os
+import time
 from datetime import datetime, timezone
+from typing import Any, Optional
+
+from connectors.http_client import build_session, get_json
 from connectors.title_utils import normalize_title
 
-MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
+MANIFOLD_URL = os.getenv(
+    "MANIFOLD_MARKETS_URL",
+    "https://api.manifold.markets/v0/markets",
+)
+
+FAST_LIMIT = max(
+    int(os.getenv("MANIFOLD_FAST_LIMIT", "100")),
+    1,
+)
+DISCOVERY_PAGE_SIZE = min(
+    max(
+        int(
+            os.getenv(
+                "MANIFOLD_DISCOVERY_PAGE_SIZE",
+                "1000",
+            )
+        ),
+        1,
+    ),
+    1000,
+)
+DISCOVERY_MAX_PAGES = max(
+    int(os.getenv("MANIFOLD_DISCOVERY_MAX_PAGES", "50")),
+    1,
+)
+REQUEST_SLEEP_SECONDS = max(
+    float(os.getenv("MANIFOLD_REQUEST_SLEEP_SECONDS", "0.20")),
+    0.0,
+)
 
 
-def _to_float(value):
+def _to_float(
+    value: Any,
+    default: Optional[float] = None,
+) -> Optional[float]:
     try:
-        if value is None:
-            return None
+        if value in (None, ""):
+            return default
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_active_binary(
+    market: dict[str, Any],
+    now_ms: int,
+) -> bool:
+    if market.get("isResolved"):
+        return False
+
+    probability = _to_float(market.get("probability"))
+    if probability is None:
+        return False
+
+    outcome_type = str(
+        market.get("outcomeType") or ""
+    ).upper()
+    if outcome_type and outcome_type != "BINARY":
+        return False
+
+    close_time = _to_float(market.get("closeTime"))
+    if close_time is not None and close_time < now_ms:
+        return False
+
+    return True
+
+
+def _market_row(
+    market: dict[str, Any],
+    *,
+    now: str,
+    mode: str,
+) -> Optional[dict[str, Any]]:
+    market_id = market.get("id")
+    probability = _to_float(market.get("probability"))
+
+    if market_id in (None, "") or probability is None:
+        return None
+    if probability < 0 or probability > 1:
         return None
 
+    title = market.get("question") or market.get("title") or ""
+    group_slugs = market.get("groupSlugs") or []
+    category = (
+        group_slugs[0]
+        if isinstance(group_slugs, list) and group_slugs
+        else "unknown"
+    )
 
-def fetch_manifold_markets(limit=100):
-    try:
-        data = requests.get(MANIFOLD_URL, timeout=20).json()
-    except Exception as e:
-        print(f"Manifold fetch failed: {e}")
-        return []
+    return {
+        "platform": "manifold",
+        "market_id": str(market_id),
+        "title": str(title),
+        "canonical_title": normalize_title(title),
+        "category": category,
+        "start_date": market.get("createdTime"),
+        "close_date": market.get("closeTime"),
+        "resolution_date": market.get("resolutionTime"),
+        "status": "open",
+        "outcome": market.get("resolution"),
+        "resolution_source": "",
+        "raw_url": market.get("url") or "",
+        "volume": _to_float(market.get("volume"), 0.0),
+        "liquidity": _to_float(
+            market.get("totalLiquidity"),
+            0.0,
+        ),
+        "yes_price": round(probability, 6),
+        "no_price": round(1.0 - probability, 6),
+        "source": f"manifold_api:{mode}",
+        "ingested_at": now,
+        "snapshot_time": now,
+        "close_time": market.get("closeTime"),
+    }
 
-    rows = []
-    now = datetime.now(timezone.utc).isoformat()
 
-    for m in data[:limit]:
-        prob = _to_float(m.get("probability"))
+def fetch_manifold_markets(
+    limit: Optional[int] = None,
+    *,
+    mode: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    refresh_mode = (
+        mode
+        or os.getenv("MARKET_REFRESH_MODE", "fast")
+    ).strip().lower()
+    discovery = refresh_mode == "discovery"
 
-        # Keep only binary/probability markets for now
-        if prob is None:
-            continue
-
-        yes_price = round(prob, 4)
-        no_price = round(1 - prob, 4)
-
-        title = m.get("question") or m.get("title") or ""
-
-        rows.append({
-            "platform": "manifold",
-            "market_id": str(m.get("id") or ""),
-            "title": title,
-            "canonical_title": normalize_title(title),
-            "category": (
-                m.get("groupSlugs", ["unknown"])[0]
-                if m.get("groupSlugs")
-                else "unknown"
+    if discovery:
+        page_size = DISCOVERY_PAGE_SIZE
+        maximum_pages = DISCOVERY_MAX_PAGES
+        maximum_rows = max(
+            int(
+                os.getenv(
+                    "MANIFOLD_DISCOVERY_MAX_MARKETS",
+                    "0",
+                )
             ),
-            "start_date": None,
-            "close_date": m.get("closeTime"),
-            "resolution_date": None,
-            "status": "closed" if m.get("isResolved") else "open",
-            "outcome": m.get("resolution"),
-            "resolution_source": "",
-            "raw_url": m.get("url") or "",
-            "volume": _to_float(m.get("volume")) or 0,
-            "liquidity": _to_float(m.get("totalLiquidity")) or 0,
-            "yes_price": yes_price,
-            "no_price": no_price,
-            "source": "manifold_api",
-            "ingested_at": now,
-        })
+            0,
+        )
+    else:
+        maximum_rows = max(int(limit or FAST_LIMIT), 1)
+        page_size = min(maximum_rows, 1000)
+        maximum_pages = 1
 
+    session = build_session()
+    before = ""
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    now_ms = int(now_dt.timestamp() * 1000)
+    rows_by_id: dict[str, dict[str, Any]] = {}
+
+    for page_number in range(1, maximum_pages + 1):
+        params: dict[str, Any] = {
+            "limit": page_size,
+            "sort": "updated-time",
+            "order": "desc",
+        }
+        if before:
+            params["before"] = before
+
+        payload = get_json(
+            session,
+            MANIFOLD_URL,
+            params=params,
+        )
+        markets = payload if isinstance(payload, list) else []
+        if not isinstance(markets, list):
+            raise RuntimeError(
+                "Manifold markets response was not a list."
+            )
+
+        active_received = 0
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            if not _is_active_binary(market, now_ms):
+                continue
+
+            row = _market_row(
+                market,
+                now=now_iso,
+                mode=refresh_mode,
+            )
+            if row is not None:
+                rows_by_id[row["market_id"]] = row
+                active_received += 1
+
+        print(
+            f"[manifold:{refresh_mode}] page={page_number} "
+            f"received={len(markets):,} "
+            f"active_binary={active_received:,} "
+            f"unique={len(rows_by_id):,}",
+            flush=True,
+        )
+
+        if maximum_rows and len(rows_by_id) >= maximum_rows:
+            break
+        if len(markets) < page_size:
+            break
+
+        last_market = markets[-1] if markets else {}
+        before = str(
+            last_market.get("id") or ""
+            if isinstance(last_market, dict)
+            else ""
+        )
+        if not before:
+            break
+
+        if REQUEST_SLEEP_SECONDS:
+            time.sleep(REQUEST_SLEEP_SECONDS)
+
+    rows = list(rows_by_id.values())
+    if maximum_rows:
+        rows = rows[:maximum_rows]
     return rows
 
 
 if __name__ == "__main__":
-    rows = fetch_manifold_markets(limit=10)
-    print(f"Fetched Manifold markets: {len(rows)}")
-    for row in rows[:3]:
-        print(row)
+    output = fetch_manifold_markets(mode="fast")
+    print(f"Fetched Manifold markets: {len(output):,}")

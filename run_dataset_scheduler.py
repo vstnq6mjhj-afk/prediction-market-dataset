@@ -15,6 +15,7 @@ from typing import Optional
 import pandas as pd
 
 from warehouse.market_warehouse import (
+    append_snapshot,
     finish_refresh_run,
     mark_abandoned_refresh_runs,
     start_refresh_run,
@@ -35,8 +36,24 @@ SNAPSHOT_INTERVAL_SECONDS = max(
     60,
 )
 SEMANTIC_INTERVAL_SECONDS = max(
-    int(os.getenv("SEMANTIC_REFRESH_SECONDS", "3600")),
+    int(os.getenv("SEMANTIC_REFRESH_SECONDS", "21600")),
     300,
+)
+DISCOVERY_INTERVAL_SECONDS = max(
+    int(os.getenv("DISCOVERY_REFRESH_SECONDS", "21600")),
+    3600,
+)
+DISCOVERY_SNAPSHOT_DIR = Path(
+    os.getenv(
+        "DISCOVERY_SNAPSHOT_DIR",
+        "/var/data/discovery_snapshots",
+    )
+)
+RUN_DISCOVERY_ON_START = (
+    os.getenv("RUN_DISCOVERY_ON_START", "false")
+    .strip()
+    .lower()
+    in {"1", "true", "yes", "on"}
 )
 STARTUP_DELAY_SECONDS = max(
     int(os.getenv("DATASET_REFRESH_STARTUP_DELAY_SECONDS", "5")),
@@ -68,6 +85,7 @@ REQUIRED_SNAPSHOT_COLUMNS = {
 
 WAREHOUSE_ACCESS_LOCK = threading.Lock()
 _SEMANTIC_THREAD: Optional[threading.Thread] = None
+_DISCOVERY_THREAD: Optional[threading.Thread] = None
 
 
 def utc_now() -> datetime:
@@ -142,6 +160,7 @@ def run_command(
     command: list[str],
     *,
     label: str,
+    env_overrides: Optional[dict[str, str]] = None,
 ) -> None:
     log(f"Running {label}: {' '.join(command)}")
     result = subprocess.run(
@@ -150,6 +169,7 @@ def run_command(
         env={
             **os.environ,
             "PYTHONPATH": str(ROOT),
+            **(env_overrides or {}),
         },
         check=False,
     )
@@ -159,8 +179,12 @@ def run_command(
         )
 
 
-def latest_snapshot_file() -> Path:
-    snapshot_dir = ROOT / "data" / "snapshots"
+def latest_snapshot_file(
+    snapshot_dir: Optional[Path] = None,
+) -> Path:
+    snapshot_dir = snapshot_dir or (
+        ROOT / "data" / "snapshots"
+    )
     files = sorted(
         snapshot_dir.glob("markets_*.csv"),
         key=lambda path: path.stat().st_mtime,
@@ -350,6 +374,115 @@ def run_semantic_cycle() -> bool:
 
 
 
+
+def run_discovery_cycle() -> bool:
+    run_id = (
+        "discovery_"
+        + utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+    )
+    started = utc_now()
+    start_refresh_run(
+        run_id=run_id,
+        refresh_type="discovery",
+        started_at=started,
+    )
+
+    try:
+        DISCOVERY_SNAPSHOT_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        run_command(
+            [
+                sys.executable,
+                "-m",
+                "ingestion.stage39_live_market_data",
+            ],
+            label="full market discovery",
+            env_overrides={
+                "MARKET_REFRESH_MODE": "discovery",
+                "SNAPSHOT_DIR": str(DISCOVERY_SNAPSHOT_DIR),
+            },
+        )
+
+        snapshot_path = latest_snapshot_file(
+            DISCOVERY_SNAPSHOT_DIR
+        )
+        snapshot_rows = validate_snapshot(snapshot_path)
+
+        with WAREHOUSE_ACCESS_LOCK:
+            append_result = append_snapshot(snapshot_path)
+            stats = warehouse_stats()
+
+        finish_refresh_run(
+            run_id=run_id,
+            status="complete",
+            completed_at=utc_now(),
+            snapshot_file=str(snapshot_path),
+            snapshot_rows=snapshot_rows,
+            total_rows=stats["total_rows"],
+            latest_snapshot=stats["latest_snapshot"],
+            error_message=None,
+        )
+
+        elapsed = (utc_now() - started).total_seconds()
+        log(
+            "Full discovery refresh complete: "
+            f"{snapshot_rows:,} current rows; "
+            f"{append_result['total_rows']:,} warehouse rows; "
+            f"elapsed={elapsed:.1f}s"
+        )
+        return True
+    except Exception as exc:
+        finish_refresh_run(
+            run_id=run_id,
+            status="failed",
+            completed_at=utc_now(),
+            snapshot_file=None,
+            snapshot_rows=None,
+            total_rows=None,
+            latest_snapshot=None,
+            error_message=str(exc),
+        )
+        log(f"Full discovery refresh failed: {exc}")
+        traceback.print_exc()
+        return False
+
+
+def discovery_worker_running() -> bool:
+    return (
+        _DISCOVERY_THREAD is not None
+        and _DISCOVERY_THREAD.is_alive()
+    )
+
+
+def long_background_worker_running() -> bool:
+    return (
+        semantic_worker_running()
+        or discovery_worker_running()
+    )
+
+
+def start_discovery_worker() -> bool:
+    global _DISCOVERY_THREAD
+
+    if long_background_worker_running():
+        log(
+            "A semantic or discovery refresh is already "
+            "running; discovery will retry later."
+        )
+        return False
+
+    _DISCOVERY_THREAD = threading.Thread(
+        target=run_discovery_cycle,
+        name="full-market-discovery",
+        daemon=True,
+    )
+    _DISCOVERY_THREAD.start()
+    log("Full market discovery started in the background.")
+    return True
+
 def semantic_worker_running() -> bool:
     return (
         _SEMANTIC_THREAD is not None
@@ -360,10 +493,10 @@ def semantic_worker_running() -> bool:
 def start_semantic_worker() -> bool:
     global _SEMANTIC_THREAD
 
-    if semantic_worker_running():
+    if long_background_worker_running():
         log(
-            "Semantic refresh is already running; "
-            "the new request was skipped."
+            "A semantic or discovery refresh is already "
+            "running; semantic refresh will retry later."
         )
         return False
 
@@ -382,6 +515,7 @@ def main(
     *,
     once: bool = False,
     include_semantics: bool = False,
+    include_discovery: bool = False,
 ) -> int:
     acquire_scheduler_lock()
 
@@ -405,16 +539,39 @@ def main(
             if RUN_SEMANTICS_ON_START
             else time.monotonic() + SEMANTIC_INTERVAL_SECONDS
         )
+        next_discovery_at = (
+            0.0
+            if RUN_DISCOVERY_ON_START
+            else time.monotonic() + DISCOVERY_INTERVAL_SECONDS
+        )
 
         while True:
             cycle_started = time.monotonic()
             snapshot_succeeded = run_snapshot_cycle()
 
             if once:
-                if snapshot_succeeded and include_semantics:
-                    semantic_succeeded = run_semantic_cycle()
-                    return 0 if semantic_succeeded else 1
-                return 0 if snapshot_succeeded else 1
+                if not snapshot_succeeded:
+                    return 1
+
+                if include_discovery:
+                    if not run_discovery_cycle():
+                        return 1
+
+                if include_semantics:
+                    if not run_semantic_cycle():
+                        return 1
+
+                return 0
+
+            discovery_due = (
+                time.monotonic() >= next_discovery_at
+            )
+            if snapshot_succeeded and discovery_due:
+                if start_discovery_worker():
+                    next_discovery_at = (
+                        time.monotonic()
+                        + DISCOVERY_INTERVAL_SECONDS
+                    )
 
             semantic_due = time.monotonic() >= next_semantic_at
             if snapshot_succeeded and semantic_due:
@@ -451,6 +608,14 @@ if __name__ == "__main__":
         help="Run one live snapshot refresh and exit.",
     )
     parser.add_argument(
+        "--include-discovery",
+        action="store_true",
+        help=(
+            "With --once, also run a full paginated "
+            "market-discovery refresh."
+        ),
+    )
+    parser.add_argument(
         "--include-semantics",
         action="store_true",
         help=(
@@ -463,5 +628,6 @@ if __name__ == "__main__":
         main(
             once=arguments.once,
             include_semantics=arguments.include_semantics,
+            include_discovery=arguments.include_discovery,
         )
     )
