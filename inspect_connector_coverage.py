@@ -13,6 +13,55 @@ DIAGNOSTICS_DIR = Path(
 )
 
 
+def _display_connector(
+    name: str,
+    values: dict,
+) -> None:
+    pagination = values.get("pagination") or {}
+
+    print(f"\n{name}")
+    print("  returned:", values.get("returned_rows"))
+    print("  accepted:", values.get("accepted_rows"))
+    print("  elapsed_seconds:", values.get("elapsed_seconds"))
+    print("  error:", values.get("error"))
+
+    if pagination:
+        print("  endpoint:", pagination.get("endpoint"))
+        print("  complete:", pagination.get("complete"))
+        print(
+            "  termination_reason:",
+            pagination.get("termination_reason"),
+        )
+        print(
+            "  pages_fetched:",
+            pagination.get("pages_fetched"),
+        )
+        print(
+            "  page_limit_reached:",
+            pagination.get("page_limit_reached"),
+        )
+        print(
+            "  raw_events_received:",
+            pagination.get("raw_events_received"),
+        )
+        print(
+            "  raw_markets_received:",
+            pagination.get("raw_markets_received"),
+        )
+        print(
+            "  duplicate_markets:",
+            pagination.get("duplicate_markets"),
+        )
+        print(
+            "  mve_filter:",
+            pagination.get("mve_filter"),
+        )
+        print(
+            "  excluded_multivariate:",
+            pagination.get("excluded_multivariate"),
+        )
+
+
 def main() -> None:
     for mode in ("fast", "discovery"):
         path = (
@@ -44,17 +93,7 @@ def main() -> None:
         for name, values in (
             payload.get("connectors") or {}
         ).items():
-            print(
-                name,
-                "returned=",
-                values.get("returned_rows"),
-                "accepted=",
-                values.get("accepted_rows"),
-                "elapsed=",
-                values.get("elapsed_seconds"),
-                "error=",
-                values.get("error"),
-            )
+            _display_connector(name, values)
 
 
 if __name__ == "__main__":

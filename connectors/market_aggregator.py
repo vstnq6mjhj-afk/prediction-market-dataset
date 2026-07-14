@@ -5,12 +5,21 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from connectors.kalshi_connector import fetch_kalshi_markets
-from connectors.manifold_connector import fetch_manifold_markets
+from connectors.kalshi_connector import (
+    fetch_kalshi_markets,
+    get_last_fetch_diagnostics as kalshi_diagnostics,
+)
+from connectors.manifold_connector import (
+    fetch_manifold_markets,
+    get_last_fetch_diagnostics as manifold_diagnostics,
+)
 from connectors.metaculus_connector import fetch_metaculus_questions
-from connectors.polymarket_connector import fetch_polymarket_markets
+from connectors.polymarket_connector import (
+    fetch_polymarket_markets,
+    get_last_fetch_diagnostics as polymarket_diagnostics,
+)
 from connectors.predictit_connector import fetch_predictit_markets
 from connectors.title_utils import normalize_title
 
@@ -65,19 +74,54 @@ def aggregate_markets(
 
     started_at = datetime.now(timezone.utc)
     connector_specs: list[
-        tuple[str, Callable[..., list[dict[str, Any]]], bool]
+        tuple[
+            str,
+            Callable[..., list[dict[str, Any]]],
+            bool,
+            Optional[Callable[[], dict[str, Any]]],
+        ]
     ] = [
-        ("kalshi", fetch_kalshi_markets, True),
-        ("polymarket", fetch_polymarket_markets, True),
-        ("manifold", fetch_manifold_markets, True),
-        ("metaculus", fetch_metaculus_questions, False),
-        ("predictit", fetch_predictit_markets, False),
+        (
+            "kalshi",
+            fetch_kalshi_markets,
+            True,
+            kalshi_diagnostics,
+        ),
+        (
+            "polymarket",
+            fetch_polymarket_markets,
+            True,
+            polymarket_diagnostics,
+        ),
+        (
+            "manifold",
+            fetch_manifold_markets,
+            True,
+            manifold_diagnostics,
+        ),
+        (
+            "metaculus",
+            fetch_metaculus_questions,
+            False,
+            None,
+        ),
+        (
+            "predictit",
+            fetch_predictit_markets,
+            False,
+            None,
+        ),
     ]
 
     rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     connector_results: dict[str, Any] = {}
 
-    for name, function, accepts_mode in connector_specs:
+    for (
+        name,
+        function,
+        accepts_mode,
+        diagnostic_getter,
+    ) in connector_specs:
         connector_started = time.monotonic()
 
         try:
@@ -120,16 +164,28 @@ def aggregate_markets(
             accepted += 1
 
         elapsed = time.monotonic() - connector_started
+        pagination = (
+            diagnostic_getter()
+            if diagnostic_getter is not None
+            else {}
+        )
+
         connector_results[name] = {
             "returned_rows": len(data),
             "accepted_rows": accepted,
             "elapsed_seconds": round(elapsed, 3),
             "error": error,
+            "pagination": pagination,
         }
+
+        completion = pagination.get("complete")
+        termination = pagination.get("termination_reason")
         print(
             f"[aggregator:{refresh_mode}] {name}: "
             f"returned={len(data):,} accepted={accepted:,} "
-            f"elapsed={elapsed:.1f}s",
+            f"elapsed={elapsed:.1f}s "
+            f"complete={completion} "
+            f"termination={termination}",
             flush=True,
         )
 

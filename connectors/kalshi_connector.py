@@ -22,13 +22,24 @@ DISCOVERY_PAGE_SIZE = min(
     1000,
 )
 DISCOVERY_MAX_PAGES = max(
-    int(os.getenv("KALSHI_DISCOVERY_MAX_PAGES", "100")),
+    int(os.getenv("KALSHI_DISCOVERY_MAX_PAGES", "250")),
     1,
 )
 REQUEST_SLEEP_SECONDS = max(
     float(os.getenv("KALSHI_REQUEST_SLEEP_SECONDS", "0.10")),
     0.0,
 )
+
+_LAST_FETCH_DIAGNOSTICS: dict[str, Any] = {}
+
+
+def get_last_fetch_diagnostics() -> dict[str, Any]:
+    return dict(_LAST_FETCH_DIAGNOSTICS)
+
+
+def _set_diagnostics(**values: Any) -> None:
+    global _LAST_FETCH_DIAGNOSTICS
+    _LAST_FETCH_DIAGNOSTICS = dict(values)
 
 
 def _num(
@@ -101,12 +112,23 @@ def _no_price(
     return None
 
 
+def _is_multivariate(market: dict[str, Any]) -> bool:
+    return bool(
+        market.get("mve_collection_ticker")
+        or market.get("multivariate_event_collection_ticker")
+        or market.get("mve_selected_legs")
+    )
+
+
 def _market_row(
     market: dict[str, Any],
     *,
     now: str,
     mode: str,
 ) -> Optional[dict[str, Any]]:
+    if _is_multivariate(market):
+        return None
+
     ticker = market.get("ticker") or market.get("market_ticker")
     if not ticker:
         return None
@@ -198,13 +220,23 @@ def fetch_kalshi_markets(
     session = build_session()
     url = f"{KALSHI_BASE_URL}/markets"
     cursor = ""
+    seen_cursors: set[str] = set()
     now = datetime.now(timezone.utc).isoformat()
     rows_by_id: dict[str, dict[str, Any]] = {}
+
+    pages_fetched = 0
+    raw_markets_received = 0
+    duplicate_markets = 0
+    excluded_multivariate = 0
+    last_page_size = 0
+    termination_reason = "not_started"
+    complete = False
 
     for page_number in range(1, maximum_pages + 1):
         params: dict[str, Any] = {
             "limit": page_size,
             "status": "open",
+            "mve_filter": "exclude",
         }
         if cursor:
             params["cursor"] = cursor
@@ -220,44 +252,101 @@ def fetch_kalshi_markets(
                 "Kalshi response field 'markets' was not a list."
             )
 
+        pages_fetched += 1
+        last_page_size = len(markets)
+        raw_markets_received += len(markets)
+
         for market in markets:
             if not isinstance(market, dict):
                 continue
+            if _is_multivariate(market):
+                excluded_multivariate += 1
+                continue
+
             row = _market_row(
                 market,
                 now=now,
                 mode=refresh_mode,
             )
-            if row is not None:
-                rows_by_id[row["market_id"]] = row
+            if row is None:
+                continue
 
-        print(
-            f"[kalshi:{refresh_mode}] page={page_number} "
-            f"received={len(markets):,} "
-            f"unique={len(rows_by_id):,}",
-            flush=True,
-        )
+            key = row["market_id"]
+            if key in rows_by_id:
+                duplicate_markets += 1
+            rows_by_id[key] = row
 
-        if maximum_rows and len(rows_by_id) >= maximum_rows:
-            break
-
-        cursor = (
+        next_cursor = (
             str(payload.get("cursor") or "")
             if isinstance(payload, dict)
             else ""
         )
-        if not cursor or not markets:
+
+        print(
+            f"[kalshi:{refresh_mode}] page={page_number} "
+            f"received={len(markets):,} "
+            f"unique={len(rows_by_id):,} "
+            f"next_cursor={'yes' if next_cursor else 'no'}",
+            flush=True,
+        )
+
+        if maximum_rows and len(rows_by_id) >= maximum_rows:
+            termination_reason = "row_cap_reached"
             break
+
+        if not markets:
+            termination_reason = "empty_page"
+            complete = True
+            break
+
+        if not next_cursor:
+            termination_reason = "cursor_exhausted"
+            complete = True
+            break
+
+        if next_cursor in seen_cursors:
+            termination_reason = "repeated_cursor"
+            break
+
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
         if REQUEST_SLEEP_SECONDS:
             time.sleep(REQUEST_SLEEP_SECONDS)
+    else:
+        termination_reason = "page_limit_reached"
 
     rows = list(rows_by_id.values())
     if maximum_rows:
         rows = rows[:maximum_rows]
+
+    if not discovery:
+        complete = False
+        termination_reason = "fast_limit"
+
+    _set_diagnostics(
+        endpoint="/markets",
+        mode=refresh_mode,
+        mve_filter="exclude",
+        pages_fetched=pages_fetched,
+        page_size=page_size,
+        maximum_pages=maximum_pages,
+        maximum_rows=maximum_rows,
+        raw_markets_received=raw_markets_received,
+        unique_markets=len(rows),
+        duplicate_markets=duplicate_markets,
+        excluded_multivariate=excluded_multivariate,
+        last_page_size=last_page_size,
+        termination_reason=termination_reason,
+        complete=complete,
+        page_limit_reached=(
+            termination_reason == "page_limit_reached"
+        ),
+    )
     return rows
 
 
 if __name__ == "__main__":
     output = fetch_kalshi_markets(mode="fast")
     print(f"Fetched Kalshi markets: {len(output):,}")
+    print(get_last_fetch_diagnostics())
