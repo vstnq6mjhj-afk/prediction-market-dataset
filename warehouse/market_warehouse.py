@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -18,7 +19,7 @@ DB_PATH = Path(
 REFRESH_STATUS_DB_PATH = Path(
     os.getenv(
         "REFRESH_STATUS_DB_PATH",
-        "/var/data/refresh_status.duckdb",
+        "/var/data/refresh_status.sqlite3",
     )
 )
 
@@ -58,15 +59,18 @@ def connect(
     return connection
 
 
-def status_connect() -> duckdb.DuckDBPyConnection:
+def status_connect() -> sqlite3.Connection:
     REFRESH_STATUS_DB_PATH.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
-    connection = duckdb.connect(
+    connection = sqlite3.connect(
         str(REFRESH_STATUS_DB_PATH),
+        timeout=30.0,
     )
-    connection.execute("SET threads = 1")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=30000")
     return connection
 
 
@@ -110,19 +114,20 @@ def initialize_status_database() -> None:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS dataset_refresh_runs (
-                run_id VARCHAR PRIMARY KEY,
-                refresh_type VARCHAR,
-                started_at TIMESTAMP WITH TIME ZONE,
-                completed_at TIMESTAMP WITH TIME ZONE,
-                status VARCHAR,
-                snapshot_file VARCHAR,
-                snapshot_rows BIGINT,
-                total_rows BIGINT,
-                latest_snapshot TIMESTAMP WITH TIME ZONE,
-                error_message VARCHAR
+                run_id TEXT PRIMARY KEY,
+                refresh_type TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                status TEXT,
+                snapshot_file TEXT,
+                snapshot_rows INTEGER,
+                total_rows INTEGER,
+                latest_snapshot TEXT,
+                error_message TEXT
             )
             """
         )
+        connection.commit()
     finally:
         connection.close()
 
@@ -336,8 +341,13 @@ def start_refresh_run(
             )
             VALUES (?, ?, ?, NULL, 'running', NULL, NULL, NULL, NULL, NULL)
             """,
-            [run_id, refresh_type, started_at],
+            (
+                run_id,
+                refresh_type,
+                started_at.isoformat(),
+            ),
         )
+        connection.commit()
     finally:
         connection.close()
 
@@ -356,6 +366,16 @@ def finish_refresh_run(
     initialize_status_database()
     connection = status_connect()
     try:
+        latest_snapshot_text = (
+            latest_snapshot.isoformat()
+            if hasattr(latest_snapshot, "isoformat")
+            else (
+                str(latest_snapshot)
+                if latest_snapshot is not None
+                else None
+            )
+        )
+
         connection.execute(
             """
             UPDATE dataset_refresh_runs
@@ -369,17 +389,18 @@ def finish_refresh_run(
                 error_message = ?
             WHERE run_id = ?
             """,
-            [
-                completed_at,
+            (
+                completed_at.isoformat(),
                 status,
                 snapshot_file,
                 snapshot_rows,
                 total_rows,
-                latest_snapshot,
+                latest_snapshot_text,
                 error_message,
                 run_id,
-            ],
+            ),
         )
+        connection.commit()
     finally:
         connection.close()
 
@@ -403,15 +424,17 @@ def mark_abandoned_refresh_runs() -> int:
                 """
                 UPDATE dataset_refresh_runs
                 SET
-                    completed_at = CURRENT_TIMESTAMP,
+                    completed_at = ?,
                     status = 'interrupted',
                     error_message = COALESCE(
                         error_message,
                         'Refresh process ended before completion.'
                     )
                 WHERE status = 'running'
-                """
+                """,
+                (datetime.utcnow().isoformat() + "Z",),
             )
+            connection.commit()
 
         return count
     finally:

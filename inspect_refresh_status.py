@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import duckdb
@@ -12,7 +13,7 @@ DB_PATH = os.getenv(
 REFRESH_STATUS_DB_PATH = Path(
     os.getenv(
         "REFRESH_STATUS_DB_PATH",
-        "/var/data/refresh_status.duckdb",
+        "/var/data/refresh_status.sqlite3",
     )
 )
 
@@ -60,35 +61,36 @@ def main() -> None:
 
     connection.close()
 
-    if REFRESH_STATUS_DB_PATH.exists():
-        status_connection = duckdb.connect(
-            str(REFRESH_STATUS_DB_PATH),
-            read_only=True,
-        )
-        try:
-            print("\nLATEST REFRESH RUNS")
-            for row in status_connection.execute(
-                """
-                SELECT
-                    refresh_type,
-                    status,
-                    started_at,
-                    completed_at,
-                    snapshot_rows,
-                    total_rows,
-                    latest_snapshot,
-                    error_message
-                FROM dataset_refresh_runs
-                ORDER BY started_at DESC
-                LIMIT 15
-                """
-            ).fetchall():
-                print(row)
-        finally:
-            status_connection.close()
-    else:
-        print("\nLATEST REFRESH RUNS")
+    print("\nLATEST REFRESH RUNS")
+    if not REFRESH_STATUS_DB_PATH.exists():
         print("Refresh status database has not been created yet.")
+        return
+
+    status_connection = sqlite3.connect(
+        str(REFRESH_STATUS_DB_PATH),
+        timeout=30.0,
+    )
+    try:
+        status_connection.execute("PRAGMA busy_timeout=30000")
+        for row in status_connection.execute(
+            """
+            SELECT
+                refresh_type,
+                status,
+                started_at,
+                completed_at,
+                snapshot_rows,
+                total_rows,
+                latest_snapshot,
+                error_message
+            FROM dataset_refresh_runs
+            ORDER BY started_at DESC
+            LIMIT 15
+            """
+        ).fetchall():
+            print(row)
+    finally:
+        status_connection.close()
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 export DB_PATH="${DB_PATH:-/var/data/warehouse.duckdb}"
 export SEMANTICS_DB_PATH="${SEMANTICS_DB_PATH:-/var/data/market_semantics.duckdb}"
 export KALSHI_NORMALIZED_DB_PATH="${KALSHI_NORMALIZED_DB_PATH:-/var/data/kalshi_normalized.duckdb}"
-export REFRESH_STATUS_DB_PATH="${REFRESH_STATUS_DB_PATH:-/var/data/refresh_status.duckdb}"
+export REFRESH_STATUS_DB_PATH="${REFRESH_STATUS_DB_PATH:-/var/data/refresh_status.sqlite3}"
 export DUCKDB_CONNECT_ATTEMPTS="${DUCKDB_CONNECT_ATTEMPTS:-30}"
 export DUCKDB_CONNECT_RETRY_SECONDS="${DUCKDB_CONNECT_RETRY_SECONDS:-0.25}"
 export DATASET_REFRESH_SECONDS="${DATASET_REFRESH_SECONDS:-300}"
