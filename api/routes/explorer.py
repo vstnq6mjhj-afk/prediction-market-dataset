@@ -3,6 +3,7 @@ import io
 import math
 import os
 import re
+import time
 from difflib import SequenceMatcher
 from datetime import date, datetime
 from decimal import Decimal
@@ -22,7 +23,18 @@ router = APIRouter(
 
 templates = Jinja2Templates(directory="api/templates")
 DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
-SEMANTICS_DB_PATH = os.getenv("SEMANTICS_DB_PATH", "/var/data/market_semantics.duckdb")
+SEMANTICS_DB_PATH = os.getenv(
+    "SEMANTICS_DB_PATH",
+    "/var/data/market_semantics.duckdb",
+)
+DUCKDB_CONNECT_ATTEMPTS = max(
+    int(os.getenv("DUCKDB_CONNECT_ATTEMPTS", "30")),
+    1,
+)
+DUCKDB_CONNECT_RETRY_SECONDS = max(
+    float(os.getenv("DUCKDB_CONNECT_RETRY_SECONDS", "0.25")),
+    0.05,
+)
 
 TOOLS = [
     {
@@ -91,13 +103,54 @@ MOVER_SORT_COLUMNS = {
 }
 
 
+def _is_duckdb_lock_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "could not set lock" in message
+        or "conflicting lock" in message
+        or "database is locked" in message
+    )
+
+
+def _connect_read_only(
+    path: str,
+    *,
+    label: str,
+) -> duckdb.DuckDBPyConnection:
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, DUCKDB_CONNECT_ATTEMPTS + 1):
+        try:
+            connection = duckdb.connect(
+                path,
+                read_only=True,
+            )
+            try:
+                connection.execute("PRAGMA threads=1")
+            except Exception:
+                pass
+            return connection
+        except Exception as exc:
+            last_error = exc
+            if (
+                not _is_duckdb_lock_error(exc)
+                or attempt >= DUCKDB_CONNECT_ATTEMPTS
+            ):
+                raise
+
+            time.sleep(DUCKDB_CONNECT_RETRY_SECONDS)
+
+    raise RuntimeError(
+        f"Could not open {label} after "
+        f"{DUCKDB_CONNECT_ATTEMPTS} attempts: {last_error}"
+    )
+
+
 def _connect() -> duckdb.DuckDBPyConnection:
-    connection = duckdb.connect(DB_PATH, read_only=True)
-    try:
-        connection.execute("PRAGMA threads=1")
-    except Exception:
-        pass
-    return connection
+    return _connect_read_only(
+        DB_PATH,
+        label="warehouse database",
+    )
 
 
 def _rows_as_dicts(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -777,12 +830,10 @@ def _connect_semantics() -> duckdb.DuckDBPyConnection:
             "Run build_semantics_separate_db.py first."
         )
 
-    connection = duckdb.connect(SEMANTICS_DB_PATH, read_only=True)
-    try:
-        connection.execute("PRAGMA threads=1")
-    except Exception:
-        pass
-    return connection
+    return _connect_read_only(
+        SEMANTICS_DB_PATH,
+        label="semantic matcher database",
+    )
 
 
 def _semantic_platforms(

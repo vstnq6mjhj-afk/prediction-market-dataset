@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import duckdb
 
 DB_PATH = os.getenv(
     "DB_PATH",
     "/var/data/warehouse.duckdb",
+)
+REFRESH_STATUS_DB_PATH = Path(
+    os.getenv(
+        "REFRESH_STATUS_DB_PATH",
+        "/var/data/refresh_status.duckdb",
+    )
 )
 
 
@@ -51,32 +58,37 @@ def main() -> None:
     ).fetchall():
         print(row)
 
-    tables = {
-        row[0]
-        for row in connection.execute("SHOW TABLES").fetchall()
-    }
-
-    if "dataset_refresh_runs" in tables:
-        print("\nLATEST REFRESH RUNS")
-        for row in connection.execute(
-            """
-            SELECT
-                refresh_type,
-                status,
-                started_at,
-                completed_at,
-                snapshot_rows,
-                total_rows,
-                latest_snapshot,
-                error_message
-            FROM dataset_refresh_runs
-            ORDER BY started_at DESC
-            LIMIT 15
-            """
-        ).fetchall():
-            print(row)
-
     connection.close()
+
+    if REFRESH_STATUS_DB_PATH.exists():
+        status_connection = duckdb.connect(
+            str(REFRESH_STATUS_DB_PATH),
+            read_only=True,
+        )
+        try:
+            print("\nLATEST REFRESH RUNS")
+            for row in status_connection.execute(
+                """
+                SELECT
+                    refresh_type,
+                    status,
+                    started_at,
+                    completed_at,
+                    snapshot_rows,
+                    total_rows,
+                    latest_snapshot,
+                    error_message
+                FROM dataset_refresh_runs
+                ORDER BY started_at DESC
+                LIMIT 15
+                """
+            ).fetchall():
+                print(row)
+        finally:
+            status_connection.close()
+    else:
+        print("\nLATEST REFRESH RUNS")
+        print("Refresh status database has not been created yet.")
 
 
 if __name__ == "__main__":

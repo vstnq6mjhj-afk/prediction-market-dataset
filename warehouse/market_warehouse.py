@@ -15,6 +15,12 @@ DB_PATH = Path(
         str(ROOT / "data" / "warehouse.duckdb"),
     )
 )
+REFRESH_STATUS_DB_PATH = Path(
+    os.getenv(
+        "REFRESH_STATUS_DB_PATH",
+        "/var/data/refresh_status.duckdb",
+    )
+)
 
 COLUMNS = [
     "platform",
@@ -39,9 +45,27 @@ COLUMNS = [
 ]
 
 
-def connect() -> duckdb.DuckDBPyConnection:
+def connect(
+    *,
+    read_only: bool = False,
+) -> duckdb.DuckDBPyConnection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = duckdb.connect(str(DB_PATH))
+    connection = duckdb.connect(
+        str(DB_PATH),
+        read_only=read_only,
+    )
+    connection.execute("SET threads = 1")
+    return connection
+
+
+def status_connect() -> duckdb.DuckDBPyConnection:
+    REFRESH_STATUS_DB_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    connection = duckdb.connect(
+        str(REFRESH_STATUS_DB_PATH),
+    )
     connection.execute("SET threads = 1")
     return connection
 
@@ -74,6 +98,15 @@ def initialize() -> None:
             )
             """
         )
+    finally:
+        connection.close()
+
+    initialize_status_database()
+
+
+def initialize_status_database() -> None:
+    connection = status_connect()
+    try:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS dataset_refresh_runs (
@@ -190,6 +223,7 @@ def append_snapshot(
         snapshot_times[0]
     ).to_pydatetime()
 
+    # Exclusive lock is held only for the transaction and checkpoint.
     connection = connect()
     try:
         connection.register("snapshot_df", frame)
@@ -249,17 +283,6 @@ def append_snapshot(
         )
         connection.execute("COMMIT")
         connection.execute("CHECKPOINT")
-
-        total_rows = int(
-            connection.execute(
-                "SELECT COUNT(*) FROM market_snapshots"
-            ).fetchone()[0]
-        )
-        return {
-            "snapshot_rows": len(frame),
-            "total_rows": total_rows,
-            "snapshot_time": snapshot_time,
-        }
     except Exception:
         try:
             connection.execute("ROLLBACK")
@@ -269,6 +292,24 @@ def append_snapshot(
     finally:
         connection.close()
 
+    # The expensive total count is read-only, so dashboard readers can
+    # operate concurrently after the short append transaction is complete.
+    read_connection = connect(read_only=True)
+    try:
+        total_rows = int(
+            read_connection.execute(
+                "SELECT COUNT(*) FROM market_snapshots"
+            ).fetchone()[0]
+        )
+    finally:
+        read_connection.close()
+
+    return {
+        "snapshot_rows": len(frame),
+        "total_rows": total_rows,
+        "snapshot_time": snapshot_time,
+    }
+
 
 def start_refresh_run(
     *,
@@ -276,8 +317,8 @@ def start_refresh_run(
     refresh_type: str,
     started_at: datetime,
 ) -> None:
-    initialize()
-    connection = connect()
+    initialize_status_database()
+    connection = status_connect()
     try:
         connection.execute(
             """
@@ -312,8 +353,8 @@ def finish_refresh_run(
     latest_snapshot: Any,
     error_message: Optional[str],
 ) -> None:
-    initialize()
-    connection = connect()
+    initialize_status_database()
+    connection = status_connect()
     try:
         connection.execute(
             """
@@ -343,17 +384,9 @@ def finish_refresh_run(
         connection.close()
 
 
-
 def mark_abandoned_refresh_runs() -> int:
-    """
-    Mark refresh rows left in 'running' state by a previous process.
-
-    The scheduler owns an operating-system lock before calling this, so no
-    active scheduler from the current deployment can legitimately own these
-    rows.
-    """
-    initialize()
-    connection = connect()
+    initialize_status_database()
+    connection = status_connect()
     try:
         count = int(
             connection.execute(
@@ -385,10 +418,9 @@ def mark_abandoned_refresh_runs() -> int:
         connection.close()
 
 
-
 def warehouse_stats() -> dict[str, Any]:
     initialize()
-    connection = connect()
+    connection = connect(read_only=True)
     try:
         row = connection.execute(
             """
