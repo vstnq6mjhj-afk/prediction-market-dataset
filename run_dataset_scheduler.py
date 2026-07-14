@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ import pandas as pd
 
 from warehouse.market_warehouse import (
     finish_refresh_run,
+    mark_abandoned_refresh_runs,
     start_refresh_run,
     warehouse_stats,
 )
@@ -62,6 +64,10 @@ REQUIRED_SNAPSHOT_COLUMNS = {
     "liquidity",
     "snapshot_time",
 }
+
+
+WAREHOUSE_ACCESS_LOCK = threading.Lock()
+_SEMANTIC_THREAD: Optional[threading.Thread] = None
 
 
 def utc_now() -> datetime:
@@ -246,12 +252,12 @@ def run_snapshot_cycle() -> bool:
         snapshot_path = latest_snapshot_file()
         snapshot_rows = validate_snapshot(snapshot_path)
 
-        run_command(
-            [sys.executable, "-m", SNAPSHOT_PIPELINE[-1]],
-            label=SNAPSHOT_PIPELINE[-1],
-        )
-
-        stats = warehouse_stats()
+        with WAREHOUSE_ACCESS_LOCK:
+            run_command(
+                [sys.executable, "-m", SNAPSHOT_PIPELINE[-1]],
+                label=SNAPSHOT_PIPELINE[-1],
+            )
+            stats = warehouse_stats()
         finish_refresh_run(
             run_id=run_id,
             status="complete",
@@ -304,12 +310,13 @@ def run_semantic_cycle() -> bool:
             [sys.executable, "collect_kalshi_normalized.py"],
             label="normalized Kalshi refresh",
         )
-        run_command(
-            [sys.executable, "build_semantics_separate_db.py"],
-            label="semantic database rebuild",
-        )
 
-        stats = warehouse_stats()
+        with WAREHOUSE_ACCESS_LOCK:
+            run_command(
+                [sys.executable, "build_semantics_separate_db.py"],
+                label="semantic database rebuild",
+            )
+            stats = warehouse_stats()
         finish_refresh_run(
             run_id=run_id,
             status="complete",
@@ -342,6 +349,35 @@ def run_semantic_cycle() -> bool:
         return False
 
 
+
+def semantic_worker_running() -> bool:
+    return (
+        _SEMANTIC_THREAD is not None
+        and _SEMANTIC_THREAD.is_alive()
+    )
+
+
+def start_semantic_worker() -> bool:
+    global _SEMANTIC_THREAD
+
+    if semantic_worker_running():
+        log(
+            "Semantic refresh is already running; "
+            "the new request was skipped."
+        )
+        return False
+
+    _SEMANTIC_THREAD = threading.Thread(
+        target=run_semantic_cycle,
+        name="semantic-refresh",
+        daemon=True,
+    )
+    _SEMANTIC_THREAD.start()
+    log("Semantic refresh started in the background.")
+    return True
+
+
+
 def main(
     *,
     once: bool = False,
@@ -350,6 +386,13 @@ def main(
     acquire_scheduler_lock()
 
     try:
+        recovered = mark_abandoned_refresh_runs()
+        if recovered:
+            log(
+                f"Marked {recovered} abandoned refresh run(s) "
+                "as interrupted."
+            )
+
         if STARTUP_DELAY_SECONDS and not once:
             log(
                 "Waiting "
@@ -367,20 +410,19 @@ def main(
             cycle_started = time.monotonic()
             snapshot_succeeded = run_snapshot_cycle()
 
-            semantic_due = (
-                include_semantics
-                if once
-                else time.monotonic() >= next_semantic_at
-            )
-            if snapshot_succeeded and semantic_due:
-                run_semantic_cycle()
-                next_semantic_at = (
-                    time.monotonic()
-                    + SEMANTIC_INTERVAL_SECONDS
-                )
-
             if once:
+                if snapshot_succeeded and include_semantics:
+                    semantic_succeeded = run_semantic_cycle()
+                    return 0 if semantic_succeeded else 1
                 return 0 if snapshot_succeeded else 1
+
+            semantic_due = time.monotonic() >= next_semantic_at
+            if snapshot_succeeded and semantic_due:
+                if start_semantic_worker():
+                    next_semantic_at = (
+                        time.monotonic()
+                        + SEMANTIC_INTERVAL_SECONDS
+                    )
 
             elapsed = time.monotonic() - cycle_started
             sleep_seconds = max(

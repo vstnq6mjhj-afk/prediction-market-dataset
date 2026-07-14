@@ -343,6 +343,49 @@ def finish_refresh_run(
         connection.close()
 
 
+
+def mark_abandoned_refresh_runs() -> int:
+    """
+    Mark refresh rows left in 'running' state by a previous process.
+
+    The scheduler owns an operating-system lock before calling this, so no
+    active scheduler from the current deployment can legitimately own these
+    rows.
+    """
+    initialize()
+    connection = connect()
+    try:
+        count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM dataset_refresh_runs
+                WHERE status = 'running'
+                """
+            ).fetchone()[0]
+        )
+
+        if count:
+            connection.execute(
+                """
+                UPDATE dataset_refresh_runs
+                SET
+                    completed_at = CURRENT_TIMESTAMP,
+                    status = 'interrupted',
+                    error_message = COALESCE(
+                        error_message,
+                        'Refresh process ended before completion.'
+                    )
+                WHERE status = 'running'
+                """
+            )
+
+        return count
+    finally:
+        connection.close()
+
+
+
 def warehouse_stats() -> dict[str, Any]:
     initialize()
     connection = connect()
