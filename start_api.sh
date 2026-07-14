@@ -10,35 +10,32 @@ export RUN_SEMANTICS_ON_START="${RUN_SEMANTICS_ON_START:-true}"
 
 mkdir -p /var/data
 
-python -u run_dataset_scheduler.py &
-SCHEDULER_PID=$!
+scheduler_supervisor() {
+  set +e
 
-uvicorn api.main:app \
-  --host 0.0.0.0 \
-  --port "${PORT}" &
-API_PID=$!
+  while true; do
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) | Starting dataset scheduler."
+    python -u run_dataset_scheduler.py
+    status=$?
+
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) | Dataset scheduler exited with status ${status}; restarting in 30 seconds."
+    sleep 30
+  done
+}
+
+scheduler_supervisor &
+SCHEDULER_SUPERVISOR_PID=$!
 
 cleanup() {
-  kill "${SCHEDULER_PID}" 2>/dev/null || true
-  kill "${API_PID}" 2>/dev/null || true
-  wait "${SCHEDULER_PID}" 2>/dev/null || true
-  wait "${API_PID}" 2>/dev/null || true
+  kill "${SCHEDULER_SUPERVISOR_PID}" 2>/dev/null || true
+  wait "${SCHEDULER_SUPERVISOR_PID}" 2>/dev/null || true
 }
 
 trap cleanup EXIT TERM INT
 
-while true; do
-  if ! kill -0 "${API_PID}" 2>/dev/null; then
-    wait "${API_PID}" || API_STATUS=$?
-    echo "API process exited unexpectedly."
-    exit "${API_STATUS:-1}"
-  fi
-
-  if ! kill -0 "${SCHEDULER_PID}" 2>/dev/null; then
-    wait "${SCHEDULER_PID}" || SCHEDULER_STATUS=$?
-    echo "Dataset scheduler exited unexpectedly."
-    exit "${SCHEDULER_STATUS:-1}"
-  fi
-
-  sleep 5
-done
+# Keep the public API as the service-critical foreground process.
+# A collector or scheduler failure is logged and retried, but cannot take
+# the website offline.
+uvicorn api.main:app \
+  --host 0.0.0.0 \
+  --port "${PORT}"

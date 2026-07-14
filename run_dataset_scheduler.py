@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import subprocess
 import sys
@@ -74,70 +75,61 @@ def log(message: str) -> None:
     )
 
 
-def process_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+_LOCK_HANDLE = None
 
 
 def acquire_scheduler_lock() -> None:
+    """
+    Hold an operating-system lock for the scheduler lifetime.
+
+    The file itself may persist on the Render disk. The lock is attached to
+    the open file descriptor and is automatically released when the process
+    exits, so a PID left by an earlier container cannot block a deployment.
+    """
+    global _LOCK_HANDLE
+
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = LOCK_PATH.open("a+", encoding="utf-8")
 
-    while True:
-        try:
-            descriptor = os.open(
-                str(LOCK_PATH),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(str(os.getpid()))
-            log(f"Scheduler lock acquired: {LOCK_PATH}")
-            return
-        except FileExistsError:
-            try:
-                existing_pid = int(
-                    LOCK_PATH.read_text(encoding="utf-8").strip()
-                )
-            except Exception:
-                existing_pid = 0
+    try:
+        fcntl.flock(
+            handle.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError as exc:
+        handle.seek(0)
+        owner = handle.read().strip() or "unknown"
+        handle.close()
+        raise RuntimeError(
+            "Another dataset scheduler currently owns the lock "
+            f"(recorded owner: {owner})."
+        ) from exc
 
-            if process_is_alive(existing_pid):
-                raise RuntimeError(
-                    "Another dataset scheduler is already running "
-                    f"with PID {existing_pid}."
-                )
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        f"pid={os.getpid()} started={utc_now().isoformat()}\n"
+    )
+    handle.flush()
 
-            log(
-                "Removing stale scheduler lock "
-                f"for PID {existing_pid or 'unknown'}."
-            )
-            try:
-                LOCK_PATH.unlink()
-            except FileNotFoundError:
-                pass
+    _LOCK_HANDLE = handle
+    log(f"Scheduler lock acquired: {LOCK_PATH}")
 
 
 def release_scheduler_lock() -> None:
-    try:
-        stored_pid = int(
-            LOCK_PATH.read_text(encoding="utf-8").strip()
-        )
-    except Exception:
-        stored_pid = None
+    global _LOCK_HANDLE
 
-    if stored_pid in (None, os.getpid()):
-        try:
-            LOCK_PATH.unlink()
-        except FileNotFoundError:
-            pass
+    if _LOCK_HANDLE is None:
+        return
+
+    try:
+        fcntl.flock(
+            _LOCK_HANDLE.fileno(),
+            fcntl.LOCK_UN,
+        )
+    finally:
+        _LOCK_HANDLE.close()
+        _LOCK_HANDLE = None
 
 
 def run_command(
