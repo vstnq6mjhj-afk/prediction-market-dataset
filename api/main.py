@@ -22,6 +22,8 @@ from api.keygen import generate_api_key
 from api.supabase_client import supabase
 from api.usage import log_api_request
 from api.routes.explorer import router as explorer_router
+# PHASE16_BILLING_V2
+from api.routes.billing_v2 import router as billing_v2_router
 
 # PHASE15B_SOURCE_POLICY
 from api.source_policy import (
@@ -83,6 +85,7 @@ app.mount(
     name="static",
 )
 app.include_router(explorer_router)
+app.include_router(billing_v2_router)
 
 # =========================
 # Shared helpers
