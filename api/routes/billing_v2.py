@@ -109,6 +109,34 @@ TERMS: dict[str, BillingTerm] = {
     ),
 }
 
+# PHASE16A_MONTHLY_ONLY
+def visible_terms() -> tuple[str, ...]:
+    raw = os.getenv("BILLING_VISIBLE_TERMS", "monthly")
+    selected: list[str] = []
+    unknown: list[str] = []
+
+    for item in str(raw).split(","):
+        slug = item.strip().lower()
+        if not slug:
+            continue
+        if slug not in TERMS:
+            unknown.append(slug)
+            continue
+        if slug not in selected:
+            selected.append(slug)
+
+    if unknown:
+        raise ValueError(
+            "BILLING_VISIBLE_TERMS contains unknown term(s): "
+            + ", ".join(sorted(set(unknown)))
+        )
+
+    if not selected:
+        return ("monthly",)
+
+    return tuple(selected)
+
+
 PLAN_CONFIG: dict[str, dict[str, Any]] = {
     "developer": {
         "name": "Prediction Market Dataset Developer",
@@ -769,8 +797,9 @@ def pricing_page_v2(
     if redirect:
         return redirect
 
+    enabled_terms = visible_terms()
     selected_term = (
-        term if term in TERMS else "monthly"
+        term if term in enabled_terms else enabled_terms[0]
     )
     ready, message = checkout_readiness()
     mode = (
@@ -783,7 +812,8 @@ def pricing_page_v2(
 
     tabs = []
     panels = []
-    for slug, term_config in TERMS.items():
+    for slug in enabled_terms:
+        term_config = TERMS[slug]
         active = " active" if slug == selected_term else ""
         tabs.append(
             f'<button class="tab{active}" '
@@ -820,11 +850,10 @@ def pricing_page_v2(
     <div class="eyebrow">Plans & billing</div>
     <h1>Choose a subscription term</h1>
     <p class="lead">
-      Select monthly, 3-month, 6-month, or annual billing.
-      Each term renews automatically until cancelled.
-      The launch defaults use the same monthly rate across
-      all terms; term discounts can be configured through
-      Render environment variables without another code change.
+      Monthly subscriptions are available during the initial
+      launch. Longer commitment terms remain disabled until the
+      platform has established stable paid usage and the terms
+      have completed legal and operational review.
     </p>
     {notice}
     <div class="tabs" role="tablist">
@@ -922,6 +951,12 @@ def create_checkout_v2(
         raise HTTPException(
             status_code=404,
             detail="Unknown billing plan or term.",
+        )
+
+    if term not in visible_terms():
+        raise HTTPException(
+            status_code=404,
+            detail="This billing term is not currently available.",
         )
 
     ready, message = checkout_readiness()
