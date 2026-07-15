@@ -23,6 +23,13 @@ from api.supabase_client import supabase
 from api.usage import log_api_request
 from api.routes.explorer import router as explorer_router
 
+# PHASE15B_SOURCE_POLICY
+from api.source_policy import (
+    PolicyContext,
+    allowed_platforms,
+    install_market_policy_view,
+)
+
 # =========================
 # Configuration
 # =========================
@@ -64,8 +71,8 @@ app = FastAPI(
     title="Prediction Market Dataset API",
     version="1.0.0",
     description=(
-        "Cross-platform prediction market data API covering Polymarket, Kalshi, "
-        "Manifold, and PredictIt. Includes market search, latest snapshots, "
+        "Cross-platform prediction market data API with commercial source availability "
+        "controlled by the source-policy allowlist. Includes market search, latest snapshots, "
         "historical market data, movers, categories, platforms, and dataset stats."
     ),
 )
@@ -88,6 +95,10 @@ def make_api_key() -> str:
 
 def query_db(sql: str, params=None):
     conn = duckdb.connect(DB_PATH, read_only=True)
+    install_market_policy_view(
+        conn,
+        PolicyContext.CUSTOMER_API,
+    )
     try:
         df = conn.execute(sql, params or []).fetchdf()
         records = df.to_dict(orient="records")
@@ -773,7 +784,7 @@ def homepage_dataset_stats():
     fallback = {
         "snapshots": "5M+",
         "markets": "500K+",
-        "platforms": "4",
+        "platforms": str(len(allowed_platforms(PolicyContext.PUBLIC_SUMMARY))),
         "latest_snapshot": "Live dataset",
     }
 
@@ -795,7 +806,7 @@ def homepage_dataset_stats():
         return {
             "snapshots": compact_count(row.get("snapshots")),
             "markets": compact_count(row.get("markets")),
-            "platforms": str(row.get("platforms") or "4"),
+            "platforms": str(row.get("platforms") or "0"),
             "latest_snapshot": latest_label,
         }
     except Exception:
@@ -811,8 +822,8 @@ def root():
     <p class="label" style="font-size:16px;">Prediction market data infrastructure</p>
     <h1>Prediction Market Dataset</h1>
     <p style="font-size:20px; max-width:850px; margin:0 auto;">
-        Unified historical and live prediction market data from Polymarket, Kalshi,
-        Manifold, and PredictIt — delivered through a REST API, customer dashboard,
+        Unified historical and live prediction market data from commercially enabled sources —
+        delivered through a REST API, customer dashboard,
         and interactive dataset explorer.
     </p>
     <div class="actions" style="justify-content:center;">
@@ -835,7 +846,7 @@ def root():
     </div>
     <div class="card">
         <h2>{escape(stats["platforms"])}</h2>
-        <p>Supported platforms: Polymarket, Kalshi, Manifold, and PredictIt.</p>
+        <p>Commercial source availability varies by licensing status and plan.</p>
     </div>
 </section>
 
@@ -943,8 +954,8 @@ def root():
     <div class="card">
         <h3>What platforms are covered?</h3>
         <p>
-            The current warehouse covers Polymarket, Kalshi, Manifold, and PredictIt.
-            Coverage will expand over time.
+            The internal warehouse may contain additional sources. Customer availability is
+            controlled separately by licensing status and plan.
         </p>
     </div>
     <div class="card">

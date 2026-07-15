@@ -15,6 +15,13 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
+# PHASE15B_SOURCE_POLICY
+from api.source_policy import (
+    PolicyContext,
+    install_market_policy_view,
+    install_semantic_policy_views,
+)
+
 router = APIRouter(
     prefix="/explorer",
     tags=["Dataset Explorer"],
@@ -146,11 +153,18 @@ def _connect_read_only(
     )
 
 
-def _connect() -> duckdb.DuckDBPyConnection:
-    return _connect_read_only(
+def _connect(
+    context: PolicyContext = PolicyContext.EXPLORER,
+) -> duckdb.DuckDBPyConnection:
+    connection = _connect_read_only(
         DB_PATH,
         label="warehouse database",
     )
+    install_market_policy_view(
+        connection,
+        context,
+    )
+    return connection
 
 
 def _rows_as_dicts(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -826,14 +840,20 @@ def _market_sparkline_points(
 def _connect_semantics() -> duckdb.DuckDBPyConnection:
     if not os.path.exists(SEMANTICS_DB_PATH):
         raise FileNotFoundError(
-            f"Semantic matcher database not found: {SEMANTICS_DB_PATH}. "
+            f"Semantic matcher database not found: "
+            f"{SEMANTICS_DB_PATH}. "
             "Run build_semantics_separate_db.py first."
         )
 
-    return _connect_read_only(
+    connection = _connect_read_only(
         SEMANTICS_DB_PATH,
         label="semantic matcher database",
     )
+    install_semantic_policy_views(
+        connection,
+        PolicyContext.MATCHER,
+    )
+    return connection
 
 
 def _semantic_platforms(
@@ -1368,7 +1388,7 @@ def export_markets_page(
     selected_sort = sort if sort in SORT_COLUMNS else "volume"
     selected_direction = "asc" if direction.lower() == "asc" else "desc"
 
-    with _connect() as connection:
+    with _connect(PolicyContext.EXPORT) as connection:
         latest_snapshot = _latest_snapshot(connection)
         if latest_snapshot is None:
             rows: List[Dict[str, Any]] = []
@@ -1561,7 +1581,7 @@ def export_movers(
     if direction not in {"asc", "desc"}:
         direction = "desc"
 
-    with _connect() as connection:
+    with _connect(PolicyContext.EXPORT) as connection:
         rows = _fetch_movers(
             connection,
             search=q,
