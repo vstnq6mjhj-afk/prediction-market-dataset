@@ -314,7 +314,7 @@ def _fetch_discovery(
 
     for page_number in range(1, maximum_pages + 1):
         params: dict[str, Any] = {
-            "live": "true",
+            "active": "true",
             "closed": "false",
             "limit": page_size,
         }
