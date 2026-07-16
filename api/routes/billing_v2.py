@@ -641,7 +641,7 @@ def _billing_shell(title: str, body: str) -> str:
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }}
     a {{ color: var(--cyan); text-decoration: none; }}
-    .wrap {{ width: min(1120px, 92vw); margin: 0 auto; padding: 42px 0 70px; }}
+    .wrap {{ width: min(1220px, 92vw); margin: 0 auto; padding: 42px 0 70px; }}
     .eyebrow {{ color: var(--cyan); font-weight: 800; letter-spacing: .02em; }}
     h1 {{
       color: #ffffff;
@@ -658,92 +658,125 @@ def _billing_shell(title: str, body: str) -> str:
       padding: 16px 18px;
       color: var(--muted);
     }}
-    .tabs {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin: 30px 0 22px;
-    }}
-    .tab {{
-      border: 1px solid var(--border);
-      background: rgba(17, 31, 50, .9);
-      color: var(--text);
-      padding: 12px 18px;
-      border-radius: 999px;
-      cursor: pointer;
-      font-weight: 800;
-    }}
-    .tab.active {{
-      background: var(--green);
-      color: #03140b;
-      border-color: var(--green);
-      box-shadow: 0 0 24px rgba(23, 239, 120, .25);
-    }}
-    .term-panel {{ display: none; }}
-    .term-panel.active {{ display: block; }}
-    .grid {{
+    .pricing-grid {{
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 20px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 30px;
+      align-items: stretch;
     }}
     .card {{
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
       border: 1px solid var(--border);
       background: linear-gradient(145deg, var(--panel), var(--panel-2));
-      border-radius: 22px;
+      border-radius: 18px;
       padding: 26px;
-      box-shadow: 0 18px 55px rgba(0, 0, 0, .18);
+      box-shadow: 0 18px 55px rgba(0, 0, 0, .16);
+    }}
+    .card.recommended {{
+      border-color: rgba(23, 239, 120, .72);
+      box-shadow:
+        0 18px 55px rgba(0, 0, 0, .16),
+        0 0 28px rgba(23, 239, 120, .10);
+    }}
+    .badge {{
+      display: inline-flex;
+      align-self: flex-start;
+      margin-bottom: 15px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: rgba(23, 239, 120, .14);
+      border: 1px solid rgba(23, 239, 120, .42);
+      color: #b9ffd5;
+      font-size: .78rem;
+      font-weight: 900;
+      letter-spacing: .03em;
+      text-transform: uppercase;
     }}
     .card h2 {{
       color: #ffffff;
       margin: 0 0 7px;
-      font-size: 1.6rem;
+      font-size: 1.55rem;
+    }}
+    .price-row {{
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 18px 0 3px;
     }}
     .price {{
       color: #ffffff;
-      font-size: 2.35rem;
+      font-size: 2.45rem;
       font-weight: 900;
-      margin: 18px 0 2px;
+      line-height: 1;
     }}
-    .equivalent {{ color: var(--muted); min-height: 1.5em; }}
-    .saving {{
-      display: inline-block;
-      margin-top: 10px;
-      color: #03140b;
-      background: var(--green);
-      border-radius: 999px;
-      padding: 5px 10px;
-      font-weight: 900;
-      font-size: .84rem;
+    .price-suffix {{
+      color: var(--muted);
+      font-size: .96rem;
+      font-weight: 700;
     }}
-    ul {{ color: var(--muted); line-height: 1.8; padding-left: 1.25rem; }}
-    .checkout {{
+    .equivalent {{
+      color: var(--muted);
+      min-height: 1.5em;
+      font-size: .92rem;
+    }}
+    .feature-list {{
+      color: var(--muted);
+      line-height: 1.72;
+      padding-left: 1.15rem;
+      margin: 22px 0 24px;
+    }}
+    .feature-list li {{
+      margin-bottom: 5px;
+    }}
+    .card-actions {{
+      margin-top: auto;
+    }}
+    .checkout,
+    .contact-sales {{
+      display: inline-flex;
       width: 100%;
-      margin-top: 10px;
-      padding: 14px 18px;
-      border: 0;
-      border-radius: 12px;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      padding: 13px 16px;
+      border-radius: 10px;
       font-weight: 900;
+      text-align: center;
+      cursor: pointer;
+      text-decoration: none;
+    }}
+    .checkout {{
+      border: 0;
       background: var(--green);
       color: #03140b;
-      cursor: pointer;
     }}
     .checkout:disabled {{
       cursor: not-allowed;
       opacity: .45;
     }}
+    .contact-sales {{
+      border: 1px solid rgba(54, 229, 223, .55);
+      background: rgba(54, 229, 223, .08);
+      color: #dffefd;
+    }}
     .terms h2 {{
       color: #ffffff;
     }}
     .terms {{
-      margin-top: 25px;
+      margin-top: 22px;
       border: 1px solid var(--border);
-      background: rgba(11, 25, 42, .84);
-      border-radius: 22px;
-      padding: 24px;
+      background: rgba(11, 25, 42, .72);
+      border-radius: 16px;
+      padding: 18px 20px;
     }}
     .small {{ color: var(--muted); font-size: .92rem; line-height: 1.65; }}
-    @media (max-width: 760px) {{
-      .grid {{ grid-template-columns: 1fr; }}
+    @media (max-width: 960px) {{
+      .pricing-grid {{ grid-template-columns: 1fr; }}
+      .card {{ min-height: auto; }}
     }}
   </style>
 </head>
@@ -762,41 +795,77 @@ def _plan_card(
     checkout_enabled: bool,
 ) -> str:
     config = PLAN_CONFIG[plan]
-    term_config = TERMS[term]
     total = amount_pence(plan, term)
-    effective = effective_monthly_pence(plan, term)
-    saving = saving_percent(plan, term)
 
     feature_items = "".join(
         f"<li>{escape(item)}</li>"
         for item in config["features"]
     )
-    saving_badge = (
-        f'<span class="saving">Save {saving}%</span>'
-        if saving
+    recommended = (
+        " recommended"
+        if plan == "professional"
+        else ""
+    )
+    badge = (
+        '<span class="badge">Most popular</span>'
+        if plan == "professional"
         else ""
     )
 
     return f"""
-    <article class="card">
+    <article class="card{recommended}">
+      {badge}
       <h2>{escape(config["display_name"])}</h2>
       <p class="small">{escape(config["description"])}</p>
-      <div class="price">{escape(format_gbp(total))}</div>
-      <div class="equivalent">
-        Charged every {escape(term_config.label.lower())}
-        · {escape(format_gbp(effective))}/month equivalent
+      <div class="price-row">
+        <div class="price">{escape(format_gbp(total))}</div>
+        <div class="price-suffix">per month</div>
       </div>
-      {saving_badge}
-      <ul>{feature_items}</ul>
-      <form method="post"
-            action="/billing/checkout/{escape(plan)}/{escape(term)}">
-        <button class="checkout"
-                type="submit"
-                {"disabled" if not checkout_enabled else ""}>
-          Choose {escape(config["display_name"])}
-          · {escape(term_config.label)}
-        </button>
-      </form>
+      <ul class="feature-list">{feature_items}</ul>
+      <div class="card-actions">
+        <form method="post"
+              action="/billing/checkout/{escape(plan)}/{escape(term)}">
+          <button class="checkout"
+                  type="submit"
+                  {"disabled" if not checkout_enabled else ""}>
+            Choose {escape(config["display_name"])}
+          </button>
+        </form>
+      </div>
+    </article>
+    """
+
+
+def _enterprise_card() -> str:
+    features = (
+        "Custom API limits",
+        "Bulk dataset exports",
+        "Custom data delivery",
+        "Team access",
+        "Priority support",
+        "Commercial licensing options",
+    )
+    feature_items = "".join(
+        f"<li>{escape(item)}</li>"
+        for item in features
+    )
+
+    return f"""
+    <article class="card">
+      <h2>Enterprise</h2>
+      <p class="small">
+        For companies, funds, universities, and teams
+        needing custom access or delivery.
+      </p>
+      <div class="price-row">
+        <div class="price">Custom</div>
+      </div>
+      <ul class="feature-list">{feature_items}</ul>
+      <div class="card-actions">
+        <a class="contact-sales" href="/contact">
+          Contact Sales
+        </a>
+      </div>
     </article>
     """
 
@@ -816,7 +885,9 @@ def pricing_page_v2(
 
     enabled_terms = visible_terms()
     selected_term = (
-        term if term in enabled_terms else enabled_terms[0]
+        "monthly"
+        if "monthly" in enabled_terms
+        else enabled_terms[0]
     )
     ready, message = checkout_readiness()
     mode = (
@@ -827,30 +898,15 @@ def pricing_page_v2(
         else "Stripe not configured"
     )
 
-    tabs = []
-    panels = []
-    for slug in enabled_terms:
-        term_config = TERMS[slug]
-        active = " active" if slug == selected_term else ""
-        tabs.append(
-            f'<button class="tab{active}" '
-            f'data-term="{escape(slug)}" type="button">'
-            f'{escape(term_config.label)}</button>'
+    cards = "".join(
+        _plan_card(
+            plan,
+            selected_term,
+            checkout_enabled=ready,
         )
-        cards = "".join(
-            _plan_card(
-                plan,
-                slug,
-                checkout_enabled=ready,
-            )
-            for plan in PLAN_CONFIG
-        )
-        panels.append(
-            f'<section class="term-panel{active}" '
-            f'id="term-{escape(slug)}">'
-            f'<div class="grid">{cards}</div>'
-            f"</section>"
-        )
+        for plan in PLAN_CONFIG
+    )
+    cards += _enterprise_card()
 
     notice = (
         f'<div class="notice"><strong>{escape(mode)}.</strong> '
@@ -865,49 +921,31 @@ def pricing_page_v2(
     body = f"""
     <a href="/dashboard">← Back to Dashboard</a>
     <div class="eyebrow">Plans & billing</div>
-    <h1>Choose a subscription term</h1>
+    <h1>Choose the right plan</h1>
     <p class="lead">
-      Monthly subscriptions are available during the initial
-      launch. Longer commitment terms remain disabled until the
-      platform has established stable paid usage and the terms
-      have completed legal and operational review.
+      Simple monthly access for developers and professional
+      data teams, with custom Enterprise options for larger
+      organizations. Commercial source availability varies
+      by licensing status and plan.
     </p>
     {notice}
-    <div class="tabs" role="tablist">
-      {''.join(tabs)}
-    </div>
-    {''.join(panels)}
+    <section class="pricing-grid">
+      {cards}
+    </section>
     <section class="terms">
-      <h2>Subscription terms</h2>
-      <ul>
-        <li>The full selected term is charged at checkout.</li>
-        <li>The subscription renews for the same term until cancelled.</li>
-        <li>Cancellation takes effect at the end of the paid billing period.</li>
-        <li>Plan limits and data-source availability depend on the active subscription and commercial licensing status.</li>
-        <li>Payments are processed by Stripe. Production checkout remains disabled until commercial data access is ready.</li>
-      </ul>
+      <h2>Monthly subscription terms</h2>
+      <p class="small">
+        Developer and Professional subscriptions renew monthly
+        until cancelled. Cancellation takes effect at the end
+        of the current paid billing period. Payments are
+        processed by Stripe.
+      </p>
       <p class="small">
         Logged in as {escape(email)}.
         See the <a href="/terms">Terms of Service</a>
         and <a href="/privacy">Privacy Policy</a>.
       </p>
     </section>
-    <script>
-      const tabs = document.querySelectorAll(".tab");
-      const panels = document.querySelectorAll(".term-panel");
-      tabs.forEach((tab) => {{
-        tab.addEventListener("click", () => {{
-          const selected = tab.dataset.term;
-          tabs.forEach((item) => item.classList.remove("active"));
-          panels.forEach((item) => item.classList.remove("active"));
-          tab.classList.add("active");
-          document.getElementById(`term-${{selected}}`).classList.add("active");
-          const url = new URL(window.location.href);
-          url.searchParams.set("term", selected);
-          window.history.replaceState({{}}, "", url);
-        }});
-      }});
-    </script>
     """
     return HTMLResponse(
         _billing_shell("Plans & Billing", body)
