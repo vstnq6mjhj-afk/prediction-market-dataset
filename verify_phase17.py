@@ -19,14 +19,6 @@ LEGACY_BILLING_PATHS = {
     "/stripe/webhook",
 }
 
-EXPECTED_ROUTE_MODULES = {
-    "/pricing": "api.routes.billing_v2",
-    "/billing/portal": "api.routes.billing_v2",
-    "/billing/sync": "api.routes.billing_sync_fix",
-    "/stripe/webhook": "api.routes.billing_v2",
-    "/admin/data-health": "api.routes.admin_data_health",
-}
-
 CUSTOMER_ALLOWLIST_ENV = (
     "CUSTOMER_API_PLATFORMS",
     "EXPLORER_DATA_PLATFORMS",
@@ -79,42 +71,75 @@ def verify_static() -> None:
             + ", ".join(sorted(leftovers))
         )
 
-    required_text = (
+    for text in (
         "app.include_router(billing_v2_router)",
         "app.include_router(billing_sync_fix_router)",
         "app.include_router(admin_data_health_router)",
-    )
-    for text in required_text:
+    ):
         if text not in source:
             raise AssertionError(f"Missing router registration: {text}")
 
-
-def verify_runtime_routes() -> None:
-    from api.main import app
-
-    for path, expected_module in EXPECTED_ROUTE_MODULES.items():
-        matches = [route for route in app.routes if getattr(route, "path", None) == path]
-        if len(matches) != 1:
-            details = [
-                f"{getattr(route, 'methods', None)} "
-                f"{getattr(getattr(route, 'endpoint', None), '__module__', None)}."
-                f"{getattr(getattr(route, 'endpoint', None), '__name__', None)}"
-                for route in matches
-            ]
-            raise AssertionError(
-                f"Expected exactly one route for {path}; found {len(matches)}: {details}"
-            )
-        endpoint = matches[0].endpoint
-        module = getattr(endpoint, "__module__", "")
-        if module != expected_module:
-            raise AssertionError(
-                f"{path} is owned by {module}, expected {expected_module}."
-            )
-        print(
-            f"PASS route {path}: "
-            f"{sorted(getattr(matches[0], 'methods', set()) or set())} "
-            f"{module}.{getattr(endpoint, '__name__', '')}"
+    if "attribute_fields" not in source or '"id"' not in source:
+        raise AssertionError(
+            "api.main.stripe_object_to_dict does not contain the Phase 17B "
+            "identifier-preservation fix."
         )
+
+
+def _verify_router_route(router, path: str, method: str, module: str) -> None:
+    matches = [
+        route
+        for route in router.routes
+        if getattr(route, "path", None) == path
+        and method in (getattr(route, "methods", set()) or set())
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"Expected one {method} route for {path}; found {len(matches)}."
+        )
+    endpoint = matches[0].endpoint
+    owner = getattr(endpoint, "__module__", "")
+    if owner != module:
+        raise AssertionError(f"{path} is owned by {owner}, expected {module}.")
+    print(
+        f"PASS router {method} {path}: "
+        f"{owner}.{getattr(endpoint, '__name__', '')}"
+    )
+
+
+def verify_router_definitions() -> None:
+    from api.routes import admin_data_health, billing_sync_fix, billing_v2
+
+    _verify_router_route(
+        billing_v2.router,
+        "/pricing",
+        "GET",
+        "api.routes.billing_v2",
+    )
+    _verify_router_route(
+        billing_v2.router,
+        "/billing/portal",
+        "POST",
+        "api.routes.billing_v2",
+    )
+    _verify_router_route(
+        billing_sync_fix.router,
+        "/billing/sync",
+        "POST",
+        "api.routes.billing_sync_fix",
+    )
+    _verify_router_route(
+        billing_v2.router,
+        "/stripe/webhook",
+        "POST",
+        "api.routes.billing_v2",
+    )
+    _verify_router_route(
+        admin_data_health.router,
+        "/admin/data-health",
+        "GET",
+        "api.routes.admin_data_health",
+    )
 
 
 def verify_safety_environment() -> None:
@@ -152,10 +177,10 @@ def verify_safety_environment() -> None:
 
 def main() -> None:
     verify_static()
-    print("PASS static compile and legacy-route cleanup.")
-    verify_runtime_routes()
+    print("PASS static compile, route registration, and Stripe-ID fix.")
+    verify_router_definitions()
     verify_safety_environment()
-    print("\nPHASE 17 VERIFICATION PASSED")
+    print("\nPHASE 17B VERIFICATION PASSED")
 
 
 if __name__ == "__main__":

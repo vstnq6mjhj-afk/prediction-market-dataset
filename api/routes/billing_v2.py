@@ -225,17 +225,55 @@ def _portal_email_or_redirect(
 
 
 def _stripe_dict(value: Any) -> dict[str, Any]:
+    """Convert Stripe objects to dictionaries without dropping identifiers."""
     if value is None:
         return {}
+
+    source = value
     if isinstance(value, dict):
-        return value
-    try:
-        return value.to_dict_recursive()
-    except Exception:
+        result: dict[str, Any] = dict(value)
+    else:
+        result = {}
         try:
-            return dict(value)
+            converted = value.to_dict_recursive()
+            if isinstance(converted, dict):
+                result = dict(converted)
         except Exception:
-            return {}
+            try:
+                converted = dict(value)
+                if isinstance(converted, dict):
+                    result = dict(converted)
+            except Exception:
+                result = {}
+
+    attribute_fields = (
+        "id",
+        "object",
+        "customer",
+        "status",
+        "created",
+        "cancel_at",
+        "cancel_at_period_end",
+        "current_period_start",
+        "current_period_end",
+        "metadata",
+        "items",
+        "price",
+        "recurring",
+        "unit_amount",
+        "subscription",
+    )
+    for key in attribute_fields:
+        if key in result and result[key] is not None:
+            continue
+        try:
+            candidate = getattr(source, key)
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            result[key] = candidate
+
+    return result
 
 
 def _first_subscription_item(

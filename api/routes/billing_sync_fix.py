@@ -20,20 +20,95 @@ STATUS_PRIORITY = {
     "incomplete_expired": 0,
 }
 
+_MISSING = object()
+
 
 def _stripe_dict(value: Any) -> dict[str, Any]:
     return billing_v2._stripe_dict(value)
 
 
+def _object_value(value: Any, key: str, default: Any = None) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, dict):
+        return value.get(key, default)
+    try:
+        candidate = getattr(value, key)
+    except Exception:
+        candidate = _MISSING
+    if candidate is not _MISSING:
+        return candidate
+    return _stripe_dict(value).get(key, default)
+
+
+def _normalize_price(value: Any) -> dict[str, Any]:
+    result = _stripe_dict(value)
+    for key in ("id", "unit_amount", "recurring", "active", "currency"):
+        candidate = _object_value(value, key, _MISSING)
+        if candidate is not _MISSING:
+            result[key] = candidate
+    recurring = result.get("recurring")
+    if recurring is not None and not isinstance(recurring, dict):
+        result["recurring"] = _stripe_dict(recurring)
+    return result
+
+
+def _normalize_item(value: Any) -> dict[str, Any]:
+    result = _stripe_dict(value)
+    for key in ("id", "current_period_start", "current_period_end"):
+        candidate = _object_value(value, key, _MISSING)
+        if candidate is not _MISSING:
+            result[key] = candidate
+    price = _object_value(value, "price", result.get("price"))
+    if price is not None:
+        result["price"] = _normalize_price(price)
+    return result
+
+
+def _normalize_subscription(value: Any) -> dict[str, Any]:
+    result = _stripe_dict(value)
+    for key in (
+        "id",
+        "customer",
+        "status",
+        "created",
+        "cancel_at",
+        "cancel_at_period_end",
+        "current_period_start",
+        "current_period_end",
+        "metadata",
+    ):
+        candidate = _object_value(value, key, _MISSING)
+        if candidate is not _MISSING:
+            result[key] = candidate
+
+    metadata = result.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        result["metadata"] = _stripe_dict(metadata)
+
+    items_value = _object_value(value, "items", result.get("items"))
+    item_data: list[Any] = []
+    if items_value is not None:
+        raw_data = _object_value(items_value, "data", _MISSING)
+        if raw_data is _MISSING:
+            raw_data = _stripe_dict(items_value).get("data")
+        if raw_data:
+            item_data = list(raw_data)
+    result["items"] = {
+        "data": [_normalize_item(item) for item in item_data]
+    }
+    return result
+
+
 def _subscription_sort_key(subscription: dict[str, Any]) -> tuple[int, int, int]:
     status = str(subscription.get("status") or "").lower()
     status_priority = STATUS_PRIORITY.get(status, -1)
-    not_cancel_scheduled = 0 if bool(
+    cancellation_scheduled = 1 if bool(
         subscription.get("cancel_at_period_end")
         or subscription.get("cancel_at")
-    ) else 1
+    ) else 0
     created = int(subscription.get("created") or 0)
-    return status_priority, not_cancel_scheduled, created
+    return status_priority, cancellation_scheduled, created
 
 
 def _error_page(message: Any, status_code: int = 500) -> HTMLResponse:
@@ -52,12 +127,7 @@ def _error_page(message: Any, status_code: int = 500) -> HTMLResponse:
 
 @router.post("/billing/sync", include_in_schema=False)
 def billing_sync_full_identifiers(request: Request):
-    """Synchronize the logged-in account from Stripe using billing_v2's full fields.
-
-    The selected Stripe subscription is passed to billing_v2.sync_subscription(),
-    which stores stripe_subscription_id, stripe_price_id, billing_term, period
-    timestamps, cancellation state, plan, status, and daily limit.
-    """
+    """Synchronize the logged-in account and persist complete Stripe IDs."""
 
     email, redirect = billing_v2._portal_email_or_redirect(request)
     if redirect:
@@ -80,23 +150,38 @@ def billing_sync_full_identifiers(request: Request):
     except Exception as exc:
         return _error_page(exc)
 
-    subscriptions = [
-        _stripe_dict(item)
-        for item in (getattr(listing, "data", None) or [])
-    ]
-    if not subscriptions:
+    raw_subscriptions = list(getattr(listing, "data", None) or [])
+    normalized = [_normalize_subscription(item) for item in raw_subscriptions]
+    if not normalized:
         return RedirectResponse(
             url="/dashboard?billing_sync=no-subscription",
             status_code=303,
         )
 
-    selected = max(subscriptions, key=_subscription_sort_key)
+    selected = max(normalized, key=_subscription_sort_key)
     selected_id = str(selected.get("id") or "").strip()
     if not selected_id:
-        return _error_page("Stripe returned a subscription without an ID.")
+        return _error_page(
+            "Stripe returned subscription data, but the SDK conversion omitted "
+            "the subscription ID. Deploy the Phase 17B Stripe object fix."
+        )
+
+    # Retrieve a full copy so nested item and price identifiers are present.
+    try:
+        retrieved = billing_v2.stripe.Subscription.retrieve(
+            selected_id,
+            expand=["items.data.price"],
+        )
+        full_subscription = _normalize_subscription(retrieved)
+    except Exception:
+        full_subscription = selected
+
+    full_subscription["id"] = selected_id
+    if not str(full_subscription.get("customer") or "").strip():
+        full_subscription["customer"] = customer_id
 
     try:
-        billing_v2.sync_subscription(selected)
+        billing_v2.sync_subscription(full_subscription)
         refreshed = billing_v2._get_api_key_row(email) or {}
     except Exception as exc:
         return _error_page(exc)
@@ -104,10 +189,9 @@ def billing_sync_full_identifiers(request: Request):
     stored_id = str(refreshed.get("stripe_subscription_id") or "").strip()
     if stored_id != selected_id:
         return _error_page(
-            "Stripe sync completed, but Supabase did not retain "
-            f"stripe_subscription_id={selected_id}. Confirm that "
-            "supabase_phase16_billing.sql has been applied and inspect "
-            "the Render log for the api_keys update error."
+            "Stripe sync completed, but Supabase did not retain the "
+            "subscription ID. The billing columns exist, so inspect the "
+            "Render log for the api_keys update error."
         )
 
     return RedirectResponse(

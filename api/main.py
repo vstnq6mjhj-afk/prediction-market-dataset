@@ -283,22 +283,60 @@ def stripe_timestamp_to_iso(value) -> Optional[str]:
 
 
 def stripe_object_to_dict(value):
-    """Convert Stripe objects to plain dicts safely.
+    """Convert Stripe objects to plain dictionaries while preserving IDs.
 
-    Newer Stripe Python objects can raise AttributeError when code treats them
-    exactly like dictionaries. This helper keeps webhook/dashboard sync stable.
+    Some Stripe SDK objects expose important fields such as ``id`` as
+    attributes even when ``to_dict_recursive()`` omits them.  Billing sync
+    must never lose subscription or price identifiers during conversion.
     """
     if value is None:
         return {}
+
+    source = value
     if isinstance(value, dict):
-        return value
-    try:
-        return value.to_dict_recursive()
-    except Exception:
+        result = dict(value)
+    else:
+        result = {}
         try:
-            return dict(value)
+            converted = value.to_dict_recursive()
+            if isinstance(converted, dict):
+                result = dict(converted)
         except Exception:
-            return {}
+            try:
+                converted = dict(value)
+                if isinstance(converted, dict):
+                    result = dict(converted)
+            except Exception:
+                result = {}
+
+    attribute_fields = (
+        "id",
+        "object",
+        "customer",
+        "status",
+        "created",
+        "cancel_at",
+        "cancel_at_period_end",
+        "current_period_start",
+        "current_period_end",
+        "metadata",
+        "items",
+        "price",
+        "recurring",
+        "unit_amount",
+        "subscription",
+    )
+    for key in attribute_fields:
+        if key in result and result[key] is not None:
+            continue
+        try:
+            candidate = getattr(source, key)
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            result[key] = candidate
+
+    return result
 
 
 def dict_get(data, key, default=None):
