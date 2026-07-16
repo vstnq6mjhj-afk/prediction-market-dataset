@@ -317,7 +317,14 @@ def safe_update_api_keys(updates: dict, column: str, value: str):
             fallback = {
                 key: val
                 for key, val in updates.items()
-                if key not in {"cancel_at_period_end", "current_period_end"}
+                if key not in {
+                    "stripe_subscription_id",
+                    "stripe_price_id",
+                    "billing_term",
+                    "current_period_start",
+                    "current_period_end",
+                    "cancel_at_period_end",
+                }
             }
             if fallback:
                 return supabase.table("api_keys").update(fallback).eq(column, value).execute()
@@ -502,6 +509,34 @@ def sync_subscription_from_stripe(email: str, row: dict):
             "stripe_customer_id",
             stripe_customer_id,
         )
+
+    # Keep complete Stripe identifiers in Supabase. The Customer Portal only
+    # needs stripe_customer_id, but storing subscription and price IDs makes
+    # webhook reconciliation, support, and cancellation checks reliable.
+    selected_metadata = stripe_object_to_dict(selected.get("metadata") or {})
+    items = stripe_object_to_dict(selected.get("items") or {})
+    item_data = items.get("data") or []
+    first_item = stripe_object_to_dict(item_data[0]) if item_data else {}
+    price = stripe_object_to_dict(first_item.get("price") or {})
+
+    safe_update_api_keys(
+        {
+            "stripe_subscription_id": str(selected.get("id") or "") or None,
+            "stripe_price_id": str(price.get("id") or "") or None,
+            "billing_term": str(
+                selected_metadata.get("billing_term") or "monthly"
+            ),
+            "current_period_start": stripe_timestamp_to_iso(
+                selected.get("current_period_start")
+                or first_item.get("current_period_start")
+            ),
+            "current_period_end": current_period_end,
+            "cancel_at_period_end": cancel_at_period_end,
+        },
+        "email",
+        email,
+    )
+
 
 def require_active_subscription(account=Depends(verify_api_key)):
     """Allow /v1/account for all valid keys, but require paid subscription for dataset endpoints."""
@@ -1109,6 +1144,19 @@ def dashboard(request: Request):
 
     api_key = row.get("api_key", "")
     explorer_url = "/explorer"
+    stripe_customer_id = str(
+        row.get("stripe_customer_id") or ""
+    ).strip()
+
+    manage_billing_button = ""
+    if stripe_customer_id:
+        manage_billing_button = """
+        <form method="post" action="/billing/portal">
+            <button class="button secondary" type="submit">
+                Manage Billing
+            </button>
+        </form>
+        """
 
     body = f"""
 <div style="text-align:center; position:relative; margin-bottom:30px;">
@@ -1124,8 +1172,8 @@ def dashboard(request: Request):
         <a class="button secondary" href="{escape(explorer_url)}" target="_blank">Open Dataset Explorer</a>
         <button class="button secondary" onclick="copyApiKey()">Copy API Key</button>
         <form method="post" action="/dashboard/api-key/regenerate"><button class="button danger" type="submit">Regenerate API Key</button></form>
-        <a class="button secondary" href="/pricing">View Plans & Billing</a>
-        <form method="post" action="/billing/portal"><button class="button secondary" type="submit">Manage Billing</button></form>
+        <a class="button secondary" href="/pricing">View Plans &amp; Billing</a>
+        {manage_billing_button}
         <form method="post" action="/billing/sync"><button class="button secondary" type="submit">Sync Billing</button></form>
     </div>
 </div>
@@ -1317,105 +1365,9 @@ def contact_page():
 """
     return page_shell("Contact", body)
 
-@app.api_route("/billing/portal", methods=["GET", "POST"], include_in_schema=False)
-async def create_billing_portal(request: Request):
-    """
-    Open Stripe Customer Portal for the currently logged-in user.
-
-    This route intentionally does NOT require an email form field anymore.
-    The dashboard uses a session cookie, so Manage Billing should work from:
-        <form method="post" action="/billing/portal">...</form>
-
-    It also supports /billing/portal?email=... as a fallback for debugging.
-    """
-    email = require_portal_user(request)
-
-    # Fallbacks only. The session cookie is the normal source of truth.
-    if not email:
-        if request.method == "POST":
-            try:
-                form = await request.form()
-                email = normalize_email(form.get("email"))
-            except Exception:
-                email = ""
-        else:
-            email = normalize_email(request.query_params.get("email"))
-
-    if not email:
-        return HTMLResponse(
-            page_shell(
-                "Missing email",
-                """
-                <h1>Missing account session</h1>
-                <p>Please log in again, then click <strong>Manage Billing</strong> from your dashboard.</p>
-                <p><a class="button" href="/login">Go to Login</a></p>
-                """,
-            ),
-            status_code=400,
-        )
-
-    row = get_api_key_row_by_email(email)
-
-    if not row:
-        return HTMLResponse(
-            page_shell(
-                "Account not found",
-                """
-                <h1>Account not found</h1>
-                <p>Please log in again so we can refresh your customer account.</p>
-                <p><a class="button" href="/login">Go to Login</a></p>
-                """,
-            ),
-            status_code=404,
-        )
-
-    stripe_customer_id = row.get("stripe_customer_id")
-
-    # If Supabase does not have the customer ID yet, try to find it in Stripe by email.
-    # This fixes older paid accounts created before stripe_customer_id was reliably stored.
-    if not stripe_customer_id:
-        try:
-            customers = stripe.Customer.list(email=email, limit=1)
-
-            if customers.data:
-                stripe_customer_id = customers.data[0].id
-                (
-                    supabase.table("api_keys")
-                    .update({"stripe_customer_id": stripe_customer_id})
-                    .eq("email", email)
-                    .execute()
-                )
-
-        except Exception as e:
-            return HTMLResponse(
-                page_shell(
-                    "Billing portal failed",
-                    f"<h1>Could not find Stripe customer</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back to dashboard</a></p>",
-                ),
-                status_code=500,
-            )
-
-    # If there is still no Stripe customer, the user has not subscribed yet.
-    if not stripe_customer_id:
-        return RedirectResponse(url="/pricing", status_code=303)
-
-    try:
-        portal_session = stripe.billing_portal.Session.create(
-            customer=stripe_customer_id,
-            return_url=f"{APP_BASE_URL}/dashboard",
-        )
-
-        return RedirectResponse(portal_session.url, status_code=303)
-
-    except Exception as e:
-        return HTMLResponse(
-            page_shell(
-                "Billing portal failed",
-                f"<h1>Billing portal failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back to dashboard</a></p>",
-            ),
-            status_code=500,
-        )
-
+# Billing portal, checkout, pricing, success, and Stripe webhook routes
+# are provided by api.routes.billing_v2. Keeping one route owner prevents
+# duplicate FastAPI paths from silently selecting legacy handlers.
 
 
 @app.post("/billing/sync", include_in_schema=False)
@@ -1664,256 +1616,6 @@ function copyText(id) {{
 """
     return page_shell("API Examples", body)
 
-@app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
-def pricing_page(request: Request):
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-
-    body = """
-<a href="/dashboard">← Back to Dashboard</a>
-<div style="text-align:center; margin-bottom:46px;">
-    <h1>Plans & Billing</h1>
-    <p>Choose the right level of access for the Prediction Market Dataset platform.</p>
-</div>
-<div class="grid">
-    <div class="card">
-        <h2>Developer</h2>
-        <div class="price">£19/mo</div>
-        <p>For individual developers, testing, prototypes, and small research projects.</p>
-        <ul>
-            <li>Prediction market REST API</li>
-            <li>Dataset Explorer access</li>
-            <li>Market search</li>
-            <li>Latest snapshots</li>
-            <li>Historical market detail</li>
-            <li>1,000 API requests/day</li>
-        </ul>
-        <form method="post" action="/billing/checkout/developer"><button type="submit" style="width:100%;">Subscribe to Developer</button></form>
-    </div>
-    <div class="card" style="border-color:#38bdf8;">
-        <h2>Professional</h2>
-        <div class="price">£49/mo</div>
-        <p>For serious users, researchers, data teams, and production applications.</p>
-        <ul>
-            <li>Everything in Developer</li>
-            <li>Higher request limits</li>
-            <li>Priority data access</li>
-            <li>Advanced dataset exploration</li>
-            <li>CSV/JSON export workflows</li>
-            <li>10,000 API requests/day</li>
-        </ul>
-        <form method="post" action="/billing/checkout/professional"><button type="submit" style="width:100%;">Subscribe to Professional</button></form>
-    </div>
-    <div class="card">
-        <h2>Enterprise</h2>
-        <div class="price">Custom</div>
-        <p>For companies, funds, universities, and teams needing custom access.</p>
-        <ul>
-            <li>Custom API limits</li>
-            <li>Bulk dataset exports</li>
-            <li>Custom data delivery</li>
-            <li>Team access</li>
-            <li>Priority support</li>
-            <li>Commercial licensing</li>
-        </ul>
-        <a class="button secondary" style="width:100%; text-align:center; box-sizing:border-box;" href="mailto:jjb9gvh6wq@privaterelay.appleid.com">Contact Sales</a>
-    </div>
-</div>
-<div class="card" style="margin-top:35px;">
-    <h2>What you get</h2>
-    <p>Prediction Market Dataset is a unified dataset platform for historical and live prediction market data across Polymarket, Kalshi, Manifold, and PredictIt.</p>
-    <p>Your subscription gives you access to API keys, the developer dashboard, dataset explorer, searchable market data, historical snapshots, and export-ready data workflows.</p>
-</div>
-"""
-    return page_shell("Plans & Billing", body)
-
-
-def create_checkout_session(email: str, plan: str):
-    plan = plan.lower()
-    if plan not in PLAN_CONFIG:
-        return HTMLResponse(page_shell("Unknown plan", "<h1>Unknown plan</h1>"), status_code=400)
-
-    if not STRIPE_SECRET_KEY:
-        return HTMLResponse(
-            page_shell(
-                "Stripe not configured",
-                "<h1>Stripe secret key is not configured</h1><p>Add STRIPE_SECRET_KEY to the API Render service environment variables.</p>",
-            ),
-            status_code=500,
-        )
-
-    config = PLAN_CONFIG[plan]
-
-    try:
-        checkout_session = stripe.checkout.Session.create(
-            mode="subscription",
-            customer_email=email,
-            client_reference_id=email,
-            line_items=[{
-                "price_data": {
-                    "currency": "gbp",
-                    "unit_amount": config["amount_pence"],
-                    "recurring": {"interval": "month"},
-                    "product_data": {
-                        "name": config["name"],
-                        "description": config["description"],
-                    },
-                },
-                "quantity": 1,
-            }],
-            success_url=f"{APP_BASE_URL}/billing/success?plan={plan}",
-            cancel_url=f"{APP_BASE_URL}/pricing",
-            metadata={"email": email, "plan": plan},
-            subscription_data={"metadata": {"email": email, "plan": plan}},
-        )
-        return RedirectResponse(checkout_session.url, status_code=303)
-    except Exception as e:
-        return HTMLResponse(
-            page_shell(
-                "Stripe checkout failed",
-                f"<h1>Stripe checkout failed</h1><pre>{escape(e)}</pre><p><a href='/pricing'>Back to pricing</a></p>",
-            ),
-            status_code=500,
-        )
-
-
-@app.post("/billing/checkout/developer", include_in_schema=False)
-def create_developer_checkout(request: Request):
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-    return create_checkout_session(email=email, plan="developer")
-
-
-@app.post("/billing/checkout/professional", include_in_schema=False)
-def create_professional_checkout(request: Request):
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-    return create_checkout_session(email=email, plan="professional")
-
-
-@app.get("/billing/success", include_in_schema=False)
-def billing_success(request: Request, plan: str):
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-
-    plan = plan.lower()
-    if plan not in PLAN_CONFIG:
-        plan = "developer"
-
-    # The webhook is the source of truth, but this keeps the dashboard responsive
-    # immediately after checkout returns.
-    update_subscription_by_email(
-        email=email,
-        plan=plan,
-        subscription_status="active",
-    )
-
-    return RedirectResponse(url="/dashboard", status_code=303)
-
-
-@app.post("/stripe/webhook", include_in_schema=False)
-async def stripe_webhook(request: Request):
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
-    if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=500, detail="Stripe webhook secret is not configured")
-
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid Stripe payload")
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(status_code=400, detail="Invalid Stripe signature")
-
-    event_type = event.get("type")
-    data_object = stripe_object_to_dict(event.get("data", {}).get("object", {}))
-
-    if event_type == "checkout.session.completed":
-        metadata = data_object.get("metadata") or {}
-        email = (
-            metadata.get("email")
-            or data_object.get("customer_email")
-            or (data_object.get("customer_details") or {}).get("email")
-        )
-        plan = metadata.get("plan", "developer")
-        stripe_customer_id = data_object.get("customer")
-
-        update_subscription_by_email(
-            email=email,
-            plan=plan,
-            subscription_status="active",
-            stripe_customer_id=stripe_customer_id,
-        )
-
-    elif event_type == "customer.subscription.updated":
-        metadata = data_object.get("metadata") or {}
-        email = normalize_email(metadata.get("email"))
-        plan = metadata.get("plan") or infer_plan_from_stripe_subscription(data_object)
-        status = str(data_object.get("status") or "active").lower()
-        stripe_customer_id = data_object.get("customer")
-
-        cancel_at_period_end = bool(data_object.get("cancel_at_period_end") or data_object.get("cancel_at"))
-        current_period_end = stripe_timestamp_to_iso(data_object.get("current_period_end") or data_object.get("cancel_at"))
-
-        if not email and stripe_customer_id:
-            try:
-                existing = (
-                    supabase.table("api_keys")
-                    .select("email")
-                    .eq("stripe_customer_id", stripe_customer_id)
-                    .limit(1)
-                    .execute()
-                )
-                if existing.data:
-                    email = normalize_email(existing.data[0].get("email"))
-            except Exception:
-                email = ""
-
-        if status in {"active", "trialing"} and email:
-            update_subscription_by_email(
-                email=email,
-                plan=plan,
-                subscription_status="active",
-                stripe_customer_id=stripe_customer_id,
-                cancel_at_period_end=cancel_at_period_end,
-                current_period_end=current_period_end,
-            )
-        elif status in {"past_due", "unpaid"}:
-            update_subscription_by_customer(stripe_customer_id, "past_due")
-            safe_update_api_keys(
-                {
-                    "cancel_at_period_end": cancel_at_period_end,
-                    "current_period_end": current_period_end,
-                },
-                "stripe_customer_id",
-                stripe_customer_id,
-            )
-        elif status in {"canceled", "incomplete_expired"}:
-            update_subscription_by_customer(stripe_customer_id, "canceled")
-            safe_update_api_keys(
-                {
-                    "cancel_at_period_end": False,
-                    "current_period_end": None,
-                },
-                "stripe_customer_id",
-                stripe_customer_id,
-            )
-
-    elif event_type == "customer.subscription.deleted":
-        stripe_customer_id = data_object.get("customer")
-        update_subscription_by_customer(stripe_customer_id, "canceled")
-        safe_update_api_keys(
-            {"cancel_at_period_end": False, "current_period_end": None},
-            "stripe_customer_id",
-            stripe_customer_id,
-        )
-
-    elif event_type == "invoice.payment_failed":
-        update_subscription_by_customer(data_object.get("customer"), "past_due")
-
-    return {"received": True}
+# Pricing, Checkout, Customer Portal, billing success, and Stripe webhook
+# endpoints are registered once through billing_v2_router near the top of
+# this file.
