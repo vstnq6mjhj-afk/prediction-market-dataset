@@ -623,8 +623,8 @@ def _billing_shell(title: str, body: str) -> str:
       --bg: #07111d;
       --panel: rgba(17, 31, 50, .88);
       --panel-2: rgba(24, 42, 66, .88);
-      --text: #f8f3b8;
-      --muted: #b8c8d9;
+      --text: #ffffff;
+      --muted: #dbe7f3;
       --cyan: #36e5df;
       --green: #17ef78;
       --border: rgba(90, 221, 230, .32);
@@ -643,7 +643,12 @@ def _billing_shell(title: str, body: str) -> str:
     a {{ color: var(--cyan); text-decoration: none; }}
     .wrap {{ width: min(1120px, 92vw); margin: 0 auto; padding: 42px 0 70px; }}
     .eyebrow {{ color: var(--cyan); font-weight: 800; letter-spacing: .02em; }}
-    h1 {{ font-size: clamp(2.3rem, 6vw, 4.4rem); margin: .35rem 0 .6rem; line-height: 1; }}
+    h1 {{
+      color: #ffffff;
+      font-size: clamp(2.3rem, 6vw, 4.4rem);
+      margin: .35rem 0 .6rem;
+      line-height: 1;
+    }}
     .lead {{ max-width: 780px; color: var(--muted); font-size: 1.05rem; line-height: 1.65; }}
     .notice {{
       margin: 24px 0;
@@ -688,8 +693,17 @@ def _billing_shell(title: str, body: str) -> str:
       padding: 26px;
       box-shadow: 0 18px 55px rgba(0, 0, 0, .18);
     }}
-    .card h2 {{ margin: 0 0 7px; font-size: 1.6rem; }}
-    .price {{ font-size: 2.35rem; font-weight: 900; margin: 18px 0 2px; }}
+    .card h2 {{
+      color: #ffffff;
+      margin: 0 0 7px;
+      font-size: 1.6rem;
+    }}
+    .price {{
+      color: #ffffff;
+      font-size: 2.35rem;
+      font-weight: 900;
+      margin: 18px 0 2px;
+    }}
     .equivalent {{ color: var(--muted); min-height: 1.5em; }}
     .saving {{
       display: inline-block;
@@ -716,6 +730,9 @@ def _billing_shell(title: str, body: str) -> str:
     .checkout:disabled {{
       cursor: not-allowed;
       opacity: .45;
+    }}
+    .terms h2 {{
+      color: #ffffff;
     }}
     .terms {{
       margin-top: 25px;
