@@ -24,6 +24,8 @@ from api.usage import log_api_request
 from api.routes.explorer import router as explorer_router
 # PHASE16_BILLING_V2
 from api.routes.billing_v2 import router as billing_v2_router
+from api.routes.admin_data_health import router as admin_data_health_router
+from api.routes.billing_sync_fix import router as billing_sync_fix_router
 
 # PHASE15B_SOURCE_POLICY
 from api.source_policy import (
@@ -86,6 +88,8 @@ app.mount(
 )
 app.include_router(explorer_router)
 app.include_router(billing_v2_router)
+app.include_router(billing_sync_fix_router)
+app.include_router(admin_data_health_router)
 
 # =========================
 # Shared helpers
@@ -1370,70 +1374,8 @@ def contact_page():
 # duplicate FastAPI paths from silently selecting legacy handlers.
 
 
-@app.post("/billing/sync", include_in_schema=False)
-def billing_sync_now(request: Request):
-    """Force-refresh local billing fields from Stripe for the logged-in user."""
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-
-    row = get_api_key_row_by_email(email)
-    if row:
-        try:
-            sync_subscription_from_stripe(email, row)
-        except Exception:
-            pass
-
-    return RedirectResponse(url="/dashboard", status_code=303)
 
 
-@app.get("/billing/debug", response_class=HTMLResponse, include_in_schema=False)
-def billing_debug(request: Request):
-    """Small logged-in debug page showing what Stripe returns for this customer."""
-    email = require_portal_user(request)
-    if not email:
-        return RedirectResponse(url="/login", status_code=303)
-
-    row = get_api_key_row_by_email(email)
-    if not row:
-        return page_shell("Billing Debug", "<h1>No account row found</h1><p><a href='/dashboard'>Back</a></p>")
-
-    stripe_customer_id = row.get("stripe_customer_id")
-    if not stripe_customer_id:
-        return page_shell("Billing Debug", "<h1>No Stripe customer ID found</h1><p><a href='/dashboard'>Back</a></p>")
-
-    try:
-        subscriptions = stripe.Subscription.list(customer=stripe_customer_id, status="all", limit=20)
-        data = [stripe_object_to_dict(item) for item in (getattr(subscriptions, "data", None) or [])]
-        rows = []
-        for sub in data:
-            rows.append(f"""
-            <tr>
-                <td>{escape(sub.get('id'))}</td>
-                <td>{escape(sub.get('status'))}</td>
-                <td>{escape(sub.get('cancel_at_period_end'))}</td>
-                <td>{escape(sub.get('cancel_at'))}</td>
-                <td>{escape(sub.get('current_period_end'))}</td>
-                <td>{escape(stripe_timestamp_to_iso(sub.get('current_period_end') or sub.get('cancel_at')))}</td>
-            </tr>
-            """)
-        table = "".join(rows) or "<tr><td colspan='6'>No subscriptions returned</td></tr>"
-        body = f"""
-        <h1>Billing Debug</h1>
-        <p>Account: {escape(email)}</p>
-        <p>Stripe customer: {escape(stripe_customer_id)}</p>
-        <form method='post' action='/billing/sync'><button type='submit'>Sync Billing Now</button></form>
-        <div class='card' style='margin-top:20px; overflow:auto;'>
-        <table style='width:100%; border-collapse:collapse; color:white;'>
-            <tr><th>ID</th><th>Status</th><th>cancel_at_period_end</th><th>cancel_at</th><th>current_period_end</th><th>decoded end</th></tr>
-            {table}
-        </table>
-        </div>
-        <p><a href='/dashboard'>Back to dashboard</a></p>
-        """
-        return page_shell("Billing Debug", body)
-    except Exception as e:
-        return page_shell("Billing Debug", f"<h1>Stripe debug failed</h1><pre>{escape(e)}</pre><p><a href='/dashboard'>Back</a></p>")
 
 
 
