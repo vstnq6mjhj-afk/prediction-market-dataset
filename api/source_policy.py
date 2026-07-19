@@ -36,7 +36,7 @@ PLATFORM_ALIASES = {
 }
 
 DEFAULT_INTERNAL_PLATFORMS = (
-    "kalshi,polymarket,predictit,manifold"
+    "kalshi,polymarket,predictit"
 )
 
 _ENV_BY_CONTEXT = {

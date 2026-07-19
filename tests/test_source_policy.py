@@ -56,7 +56,6 @@ class SourcePolicyTests(unittest.TestCase):
                     "kalshi",
                     "polymarket",
                     "predictit",
-                    "manifold",
                 ),
             )
 
