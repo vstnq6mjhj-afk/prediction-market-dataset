@@ -573,6 +573,16 @@ def _table(headers: Iterable[str], rows: Iterable[Iterable[Any]]) -> str:
     )
 
 
+
+
+PLATFORM_LICENSING_STATUS = (
+    ("Kalshi", "Application in progress", "Disabled", "Written commercial agreement required"),
+    ("Polymarket", "Permission request pending", "Disabled", "Written commercial agreement required"),
+    ("PredictIt", "Permission request pending", "Disabled", "Written commercial agreement required"),
+    ("Metaculus", "Not integrated; permission required", "Disabled", "Do not collect or expose without approval"),
+    ("Manifold", "Declined", "Prohibited", "New collection suspended; existing records restricted"),
+)
+
 def _render_page(admin_email: str) -> str:
     warehouse = _warehouse_data()
     refresh = _refresh_runs()
@@ -816,6 +826,12 @@ def _render_page(admin_email: str) -> str:
     <h2>Semantic and matcher tables</h2>
     <p class="muted">Latest detected semantic timestamp or database modification: {_escape(_format_value(semantics.get('latest_refresh')))}</p>
     {_table(('Table','Rows','Latest timestamp','State'), semantic_rows)}
+  </section>
+
+  <section class="panel">
+    <h2>Commercial licensing status</h2>
+    <p class="muted">Operational status only. This table does not grant rights or expose market data.</p>
+    {_table(('Platform','Licensing status','Customer exposure','Required action'), PLATFORM_LICENSING_STATUS)}
   </section>
 
   <section class="panel">

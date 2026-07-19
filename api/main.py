@@ -42,6 +42,25 @@ DB_PATH = os.getenv("DB_PATH", "/var/data/warehouse.duckdb")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://prediction-market-dataset-api.onrender.com")
 DATASET_EXPLORER_URL = os.getenv("DATASET_EXPLORER_URL", "https://prediction-market-dataset.onrender.com")
 
+
+# PHASE18_COMPANY_IDENTITY
+COMPANY_LEGAL_NAME = os.getenv(
+    "COMPANY_LEGAL_NAME", "PMD Data Systems Ltd"
+).strip()
+COMPANY_NUMBER = os.getenv("COMPANY_NUMBER", "17347262").strip()
+COMPANY_JURISDICTION = os.getenv(
+    "COMPANY_JURISDICTION", "England and Wales"
+).strip()
+COMPANY_TRADING_NAME = os.getenv(
+    "COMPANY_TRADING_NAME", "Prediction Market Dataset"
+).strip()
+COMPANY_REGISTERED_OFFICE = os.getenv(
+    "COMPANY_REGISTERED_OFFICE", ""
+).strip()
+COMPANY_CONTACT_EMAIL = os.getenv(
+    "COMPANY_CONTACT_EMAIL", ""
+).strip()
+
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 stripe.api_key = STRIPE_SECRET_KEY
@@ -637,6 +656,12 @@ footer {{ margin-top:70px; text-align:center; color:#64748b; }}
 <body>
 <div class="container">
 {body}
+<footer>
+  <div>{escape(COMPANY_TRADING_NAME)} is a trading name of {escape(COMPANY_LEGAL_NAME)}.</div>
+  <div>{escape(COMPANY_LEGAL_NAME)} is registered in {escape(COMPANY_JURISDICTION)} under company number {escape(COMPANY_NUMBER)}.</div>
+  <div>Registered office: {escape(COMPANY_REGISTERED_OFFICE) if COMPANY_REGISTERED_OFFICE else "Registered office available on the Companies House register."}</div>
+  <div>© 2026 {escape(COMPANY_LEGAL_NAME)}. All rights reserved.</div>
+</footer>
 </div>
 </body>
 </html>
@@ -1257,6 +1282,14 @@ def terms_page():
 <p>Last updated: July 2026</p>
 
 <div class="card">
+    <h2>About us</h2>
+    <p>
+        Prediction Market Dataset is a trading name of PMD Data Systems Ltd,
+        a private limited company registered in England and Wales under company
+        number 17347262. References to “PMD”, “Prediction Market Dataset”, “we”,
+        “us” or “our” mean PMD Data Systems Ltd.
+    </p>
+
     <h2>1. Service</h2>
     <p>
         Prediction Market Dataset provides access to historical and live prediction
@@ -1323,6 +1356,12 @@ def privacy_page():
 <p>Last updated: July 2026</p>
 
 <div class="card">
+    <h2>Who we are</h2>
+    <p>
+        PMD Data Systems Ltd is the controller responsible for personal data
+        processed through Prediction Market Dataset. Company number: 17347262.
+    </p>
+
     <h2>1. Information We Collect</h2>
     <p>
         We collect account information such as email address, login details, subscription status,

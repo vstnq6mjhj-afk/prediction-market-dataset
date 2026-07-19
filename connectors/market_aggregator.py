@@ -22,6 +22,7 @@ from connectors.polymarket_connector import (
 )
 from connectors.predictit_connector import fetch_predictit_markets
 from connectors.title_utils import normalize_title
+from api.source_policy import PolicyContext, allowed_platforms
 
 DIAGNOSTICS_DIR = Path(
     os.getenv(
@@ -113,6 +114,7 @@ def aggregate_markets(
         ),
     ]
 
+    enabled_platforms = set(allowed_platforms(PolicyContext.INTERNAL))
     rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     connector_results: dict[str, Any] = {}
 
@@ -123,6 +125,25 @@ def aggregate_markets(
         diagnostic_getter,
     ) in connector_specs:
         connector_started = time.monotonic()
+
+        if name not in enabled_platforms:
+            connector_results[name] = {
+                "returned_rows": 0,
+                "accepted_rows": 0,
+                "elapsed_seconds": 0.0,
+                "error": None,
+                "pagination": {
+                    "complete": True,
+                    "termination_reason": "disabled_by_internal_source_policy",
+                },
+                "enabled": False,
+            }
+            print(
+                f"[aggregator:{refresh_mode}] {name}: disabled by "
+                "INTERNAL_DATA_PLATFORMS",
+                flush=True,
+            )
+            continue
 
         try:
             data = (
@@ -176,6 +197,7 @@ def aggregate_markets(
             "elapsed_seconds": round(elapsed, 3),
             "error": error,
             "pagination": pagination,
+            "enabled": True,
         }
 
         completion = pagination.get("complete")

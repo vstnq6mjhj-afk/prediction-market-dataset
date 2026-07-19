@@ -12,3 +12,12 @@ data/
 __pycache__/
 *.pyc
 .env
+# Python caches
+*.py[cod]
+
+# Local patch backups
+*.bak
+*.before_phase*
+
+# Local environment files
+.env.*
